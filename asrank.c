@@ -327,6 +327,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	struct aspath *pt;
 	
 	nets = 0;
+	if (route == NULL) return 0;
 	if (route->left)
 		nets += collect_stats(route->left, preflen+1);
 	if (route->right) {
