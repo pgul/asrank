@@ -1,0 +1,433 @@
+#! /usr/bin/perl
+
+# TODO:
+# - upstream of upstream -> upstream?
+# - diffrent relations for different prefixes
+# - задание метода сортировки
+# - учёт стабильности, усреднение за период
+# - оценка связности, т.е. подсчёт кол-ва различных путей для клиентов
+# - each as is tier1 candidate?
+
+# Определение направления линка (uplink/downlink)
+#   1. Who is Tier1?  If no path with routes("... a N")>0.5(fullview) and routes("... a")>0.5(fullview) -> a is tier1 candidate
+#      if routes("a b c")>0,5 * fullview, a and b are not tier1
+#      "... tier1 ... tier1 ..." -> invalid
+#      Tier1 should have full mesh.
+#   2. routes("a b c .*") > 0.3 * fullview   ->  a->b, b->c
+#   3. "... tier1 a b c"  ->  c->b, b->a
+#   4. "a b c tier1 ..."  ->  a->b, b->c
+#   5. "a b tier1 tier1 c d" -> a->b, d->c
+#   6. "a b c d ...", if c->d  ->  a->b, b->c
+#   7. "... a b c d", id b->a  ->  d->c, c->b
+#   8. rest - peerings
+
+$debug = 1;
+$asnames = "asnames";
+$do_stage3 = 0;
+$strict = 1;	# Possible different AS relations for different prefixes
+
+$trace = qw(213.133.160.0/19);
+
+@tier1_hints = qw(174 209 701 1239 1299 1668 2914 3356 3549 3561 7018);
+
+# input in "bgpdump -M" format, i.e.
+# TABLE_DUMP_V2|07/08/09 14:00:14|A|96.4.0.55|11686|217.76.207.0/24|11686 174 1299 6849 16066|IGP
+
+#$regex = '[^0-9](' . join('|', keys %ua) . ')( [0-9 ]*)?\\|[^|]+$';
+## grep is much more efficient then perl filtering
+#$cmd = "/usr/bin/grep -E '$regex'";
+#$cmd .= " '$_'" foreach (@ARGV);
+#open(F, "$cmd |") || die "Cannot execute '$cmd': $!\n";
+#while (<F>) {
+$| = 1 if $debug;
+$curpref = '';
+debug("Parsing input file(s)");
+while (<>) {
+	($orig, $prefix, $aspath) = (split(/\|/))[4,5,6];
+	next unless $prefix =~ /^\d+\.\d+\.\d+\.\d+\/(\d+)$/;
+	$preflen = $1;
+	next if $preflen > 24;
+	next if $preflen == 0;
+	$path = '';
+	$prevas = '';
+	# sorted by prefixes
+	%prefpath = () if $prefix ne $curpref;
+	$curpref = $prefix;
+	next if $prefpath{$orig};
+	$prefpath{$orig} = 1;
+	foreach $as (split(/\s+/, $aspath)) {
+		next unless $as =~ /^\d+(\.\d+)?$/;
+		next if $as eq $prevas;
+		$prevas = $as;
+		if ($wasas{$as}) {	# loop
+			$ras = $as;
+			$ras =~ s/\./\\./g;
+			if ($path =~ /(^| )$ras /) {
+				$path = "$`$1$as";
+				next;
+			}
+		} else {
+			$wasas{$as} = 1;
+		}
+		$path .= " " if $path;
+		$path .= $as;
+		$pathes{$path}++;
+	}
+	delete($wasas{$key}) while (($key) = each %wasas);
+	$aspath{$path}++;
+	unless ($prefixes{$prefix}) {
+		$fullview++;
+		print '#' if ($debug && $fullview % 2000 == 0);
+		$prefixes{$prefix} = 1;
+	}
+	# save info
+	$data{$prefix} .= '|' if $data{$prefix};
+	$data{$prefix} .= $path;
+}
+print "\n" if $debug;
+debug("RIB table read, $fullview prefixes, " . ((keys %aspath)+0) . " pathes");
+
+# find aspath with max routes for each as
+foreach $aspath (keys %pathes) {
+	next unless $aspath =~ /\d+(\.\d+)?$/;
+	$routes{$&} = $pathes{$aspath} if $routes{$&} < $pathes{$aspath};
+	next unless $` =~ /(\d+(?:\.\d+)?)\s+$/;
+	$proutes{$1} = $pathes{$aspath} if $proutes{$1} < $pathes{$aspath};
+}
+debug("Max routes for each AS found");
+while (($key, $val) = each %pathes) {
+	delete($pathes{$key}) if $val < 0.3 * $fullview;
+}
+#if ($debug) {
+#	$i = 0;
+#	foreach $as (sort { $routes{$b} <=> $routes{$a} } keys %routes) {
+#		printf('%7d %7d %5d%s', $routes{$as}, $proutes{$as}, $as, "\n");
+#		last if $i++ == 100;
+#	}
+#}
+
+# find tier1
+debug("Look for tier1");
+foreach $as (keys %routes) {
+	next unless $routes{$as} > 0.5 * $fullview;
+	next unless $proutes{$as} < 0.5 * $fullview;
+	$tier1{$as} = 1;
+	$tier1++;
+}
+
+delete($routes{$key})  while (($key) = each %routes);
+delete($proutes{$key}) while (($key) = each %proutes);
+
+debug("Found $tier1 candidates to Tier1");
+
+foreach (@tier1_hints) {
+	unless ($tier1{$_}) {
+		debug("Add $_ as tier1 by hints");
+		$tier1{$_}=1;
+	}
+	$tier1_hints{$_}=1;
+}
+
+# count %conn, $npath
+$regex = join('|', keys %tier1);
+$regex =~ s/\./\\./g;
+foreach $aspath (keys %aspath) {
+	foreach $as (split(/ /, $aspath)) {
+		$npath{$as}++ if $tier1{$as};
+	}
+	$ntier1 = 1;
+	$p = $aspath;
+	while ($p =~ /(?:^| )($regex) ($regex)( |$)/) {
+		$conn{$1}->{$2} = 1;
+		$conn{$2}->{$1} = 1;
+		$p = "$2$3$'";
+		$ntier1++;
+	}
+	push(@invalid, $aspath) if $ntier1 >= 3;
+}
+
+debug("Found " . (@invalid+0) . " invalid pathes");
+while (@invalid) {
+	@inv=();
+	$tier1{$_} = 1 foreach (keys %tier1);
+	$regex = join('|', keys %tier1);
+	$regex =~ s/\./\\./g;
+	$tier1_inv{$as} = '' foreach keys %tier1_hints;
+	foreach $path (@invalid) {
+		#next unless $path =~ /(?:^| )(($regex)(?: \d+(?:\.\d+)?)+ ($regex))( |$)/;
+		next unless $path =~ /(?:^| )(($regex)(?: (?:$regex))+ ($regex))( |$)/;
+		#debug("invalid path: $path (tier1 part: $1)");
+		$tier1{$2}++;
+		$tier1{$3}++;
+		if ($debug) {
+			if ($tier1_hints{$2}) {
+				$tier1_inv{$2} .= "|" if $tier1_inv{$2};
+				$tier1_inc{$2} .= $path;
+			}
+			if ($tier1_hints{$3}) {
+				$tier1_inv{$3} .= "|" if $tier1_inv{$3};
+				$tier1_inv{$3} .= $path;
+			}
+		}
+		push(@inv, $path);
+	}
+	debug("Found " . (@inv+0) . " invalid pathes");
+	last unless @inv;
+	@invalid = @inv;
+	# remove one tier1
+	foreach $as (keys %conn) {
+		foreach $as2 (keys %{$conn{$as}}) {
+			$nconn{$as}++ if ($tier1{$as} && $tier1{$as2});
+		}
+	}
+	@tier1 = sort { $tier1{$b}/$npath{$b} <=> $tier1{$a}/$npath{$a} || $nconn{$a} <=> $nconn{$b} } keys %tier1;
+	debug(sprintf('%5d is not Tier1 (%d rate, %d pathes, %d conns)', $tier1[0], $tier1{$tier1[0]}, $npath{$tier1[0]}, $nconn{$tier1[0]}));
+	if ($tier1_hints{$tier1[0]}) {
+		foreach (split(/\|/, $tier1_inv{$tier1[0]})) {
+			debug("Bad path: $_");
+		}
+	}
+	delete($tier1_inv{$key}) while (($key) = each %tier1_inv);
+	delete($tier1{$tier1[0]});
+	delete($nconn{$key}) while (($key) = each %nconn);
+}
+@tier1=@invalid=();
+# Need full mesh in tier1's
+while (1) {
+	foreach $as (keys %conn) {
+		foreach $as2 (keys %{$conn{$as}}) {
+			$nconn{$as}++ if ($tier1{$as} && $tier1{$as2});
+		}
+	}
+	@tier1 = sort { $nconn{$a}*$npath{$a} <=> $nconn{$b}*$npath{$b}  } keys %tier1;
+	last if $nconn{$tier1[0]} > $#tier1*2/3;
+	#last if $nconn{$tier1[0]}*$npath{$tier1[0]} > $#tier1*2/3;
+	debug(sprintf('%5d is not Tier1 (%d pathes, %d conns)', $tier1[0], $npath{$tier1[0]}, $nconn{$tier1[0]}));
+	delete($tier1{$tier1[0]});
+	delete($nconn{$key}) while (($key) = each %nconn);
+}
+
+while (($key, $val) = each %conn) {
+	delete($conn{$key}->{$key2}) while (($key2) = each %{$val});
+	delete($conn{$key});
+}
+if ($debug) {
+	print "  Tier1 list:\n";
+	foreach (sort { $a <=> $b } keys %tier1) {
+		printf '%5d %7d %7d%s', $_, $nconn{$_}, $npath{$_}, "\n";
+	}
+}
+while (($key) = each %npath) { delete($npath{$key}); }
+
+debug("Build relations between ASs");
+# Ok, now set weight for every AS and AS relations
+$regex = join('|', keys %tier1);
+$regex =~ s/\./\\./g;
+foreach $path (keys %pathes) {
+	#next if $pathes{$path} < 0.3 * $fullview;
+	@path = split(/ /, $path);
+	for ($i=0; $i<$#path; $i++) {
+		$rel{$path[$i]}->{$path[$i+1]} += 1000000;
+		$rel{$path[$i+1]}->{$path[$i]} -= 1000000;
+	}
+}
+delete($pathes{$key}) while (($key) = each %pathes);
+if ($debug) {
+	foreach $as (keys %rel) {
+		foreach $as2 (keys %{$rel{$as}}) {
+			debug(sprintf("%5d is upstream for %5d", $as2, $as)) if $rel{$as}->{$as2}>0;
+		}
+	}
+}
+debug("Stage 1 complete");
+
+foreach $aspath (keys %aspath) {
+	if ($aspath =~ /(^| )($regex) ($regex)( |$)/) {
+		($head, $tail) = ("$`$1$2", "$3$4$'");
+	} elsif ($aspath =~ /(^| )($regex)( |$)/) {
+		($head, $tail) = ($`, $');
+	} else {
+		next;
+	}
+	@path = split(/ /, $head);
+	for ($i=0; $i<$#path; $i++) {
+		$rel{$path[$i]}->{$path[$i+1]} += 100;
+		$rel{$path[$i+1]}->{$path[$i]} -= 100;
+	}
+	@path = split(/ /, $tail);
+	for ($i=0; $i<$#path; $i++) {
+		$rel{$path[$i]}->{$path[$i+1]} -= 100;
+		$rel{$path[$i+1]}->{$path[$i]} += 100;
+	}
+}
+if ($debug) {
+	foreach $as (keys %rel) {
+		foreach $as2 (keys %{$rel{$as}}) {
+			debug(sprintf("%5s is upstream for %5s (weight %7d)", $as2, $as, $rel{$as}->{$as2})) if $rel{$as}->{$as2}>0;
+		}
+	}
+}
+debug("Stage 2 complete");
+
+$pass = 0;
+while ($do_stage3) {
+	foreach $aspath (keys %aspath) {
+		next if /(^| )($regex)( |$)/;
+		@path = split(/ /, $aspath);
+		$wasundef = 0;
+		$ifrom = 0;
+		for ($i=0; $i<$#path; $i++) {
+			if (!$rel{$path[$i]}->{$path[$i+1]}) {
+				$wasundef = 1;
+			} elsif ($rel{$path[$i]}->{$path[$i+1]} < 0) {
+				last;
+			} else {
+				if ($wasundef) {
+					for ($j=$ifrom; $j<$i; $j++) {
+						unless ($rel{$path[$j]}->{$path[$j+1]}) {
+							$newrel{$path[$j]}->{$path[$j+1]}++;
+							$newrel{$path[$j+1]}->{$path[$j]}--;
+						}
+					}
+				}
+				$fromi = $i;
+				$wasundef = 0;
+			}
+		}
+		$ifrom = $#path;
+		for ($i=$#path-1; $i>=0; $i--) {
+			if (!$rel{$path[$i]}->{$path[$i+1]}) {
+				$wasundef = 1;
+			} elsif ($rel{$path[$i]}->{$path[$i+1]} > 0) {
+				last;
+			} else {
+				if ($wasundef) {
+					for ($j=$ifrom; $j>$i; $j--) {
+						unless ($rel{$path[$j]}->{$path[$j+1]}) {
+							$newrel{$path[$j]}->{$path[$j+1]}--;
+							$newrel{$path[$j+1]}->{$path[$j]}++;
+						}
+					}
+				}
+				$fromi = $i;
+				$wasundef = 0;
+			}
+		}
+	}
+	$updated = 0;
+	while (($as, $rel) = each %newrel) {
+		while (($as2) = each %{$rel}) {
+			if ($newrel{$as}->{$as2}) {
+				$updated = 1;
+				$rel{$as}->{$as2} = $newrel{$as}->{$as2};
+				if ($debug && $rel{$as}->{$as2} > 0) {
+					debug(sprintf("%5s is upstream for %5s (weight %7d)", $as2, $as, $rel{$as}->{$as2}));
+				}
+			}
+			delete($newrel{$as}->{$as2});
+		}
+		delete($newrel{$as});
+	}
+	last unless $updated;
+	$pass++;
+	debug("Stage 3.$pass complete");
+}
+debug("Stage 3 complete") if $do_stage3;
+
+# OK, relations built, now calculate client's cone for each as
+debug("Calculate AS clients statistics");
+$trace{$_} = 1 foreach @trace;
+while (($prefix, $data) = each %data) {
+	next unless $prefix =~ /\/(\d+)$/;
+	$preflen = $1;
+	#foreach $aspath (@{$data}) {
+	foreach $aspath (split(/\|/, $data)) {
+		# is this aspath valid?
+		# "valid" means inc-inc-inc, then zero or more unknown, then dec-dec-dec
+		@path = split(/ /, $aspath);
+		$stage=1;
+		$ifrom=-1;
+		$path='';
+		for ($i=0; $i<$#path; $i++) {
+			$path .= $path[$i];
+			if ($rel{$path[$i]}->{$path[$i+1]} > 0) {
+				$path .= '>';
+				$stage=-1 unless $stage==1;
+			} elsif ($rel{$path[$i]}->{$path[$i+1]} == 0) {
+				$path .= '-';
+				$rel{$path[$i]}->{$path[$i+1]} = 0;	# define
+			} else { # rel < 0
+				$path .= '<';
+				next if ($stage==2 || $stage==-1);
+				$stage=2;
+				$ifrom=$i;
+			}
+		}
+		$path .= $path[$#path];
+		$upstream{$path[$#path]} = 1;
+		$coneas{$path[$#path]}->{$path[$#path]} = 1;
+		if ($stage==-1) {
+			debug("Invalid path: $path (prefix $prefix)");
+			next;
+		}
+		next if $ifrom<0;
+		if ($strict) {
+			next unless $aspath =~ /(^| )($regex)( |$)/;
+		}
+		debug("trace: $path") if $trace{$prefix};
+		for ($i=$ifrom; $i<$#path; $i++) {
+			$upstream{$path[$i]} = 1;
+			$coneas{$path[$i]}->{$path[$#path]} = 1;
+		}
+	}
+	delete($data{$prefix});
+	foreach (keys %upstream) {
+		$n24{$_} += 1<<(24-$preflen);
+		$npref{$_}++;
+	}
+	delete($upstream{$key}) while (($key) = each %upstream);
+}
+debug("Complete, calculate degree");
+while (($as, $rel) = each %rel) {
+	while (($as2, $rel2) = each %{$rel}) {
+		$degree{$as}++;
+		delete($rel{$as}->{$as2});
+	}
+	delete($rel{$as});
+}
+debug("Complete, calculate ASs in cones");
+while (($as, $ras) = each %coneas) {
+	while (($as2) = each %{$ras}) {
+		$nas{$as}++;
+		delete($coneas{$as}->{$as2});
+	}
+	delete($coneas{$as});
+}
+debug("Done");
+
+# read as names
+if (open(F, "<$asnames")) {
+	while (<F>) {
+		chomp();
+		next unless /^(\d+(?:\.\d+)?):\s*(\S.*)$/;
+		$name{$1} = $2;
+		$name{$1} =~ s/\s+$//;
+	}
+	close(F);
+}
+
+# Ok, now we have %n24, %npref, %degree and %nas for each as
+
+printf "         AS      Name            /24    Pfxs   AS  Degree\n";
+$i=1;
+foreach $as (sort { $n24{$b} <=> $n24{$a} } keys %n24 ) {
+	printf '%5d. %5s %-16s %7d %6d %5d %5d%s', $i++, $as, substr($name{$as}, 0, 16), $n24{$as}, $npref{$as}, $nas{$as}, $degree{$as}, "\n";
+}
+
+sub debug
+{
+	return unless $debug;
+
+	print (localtime() . " $_[0]\n");
+}
+

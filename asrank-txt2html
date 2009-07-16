@@ -1,0 +1,92 @@
+#! /usr/bin/perl
+
+# convers ascii astank output to html table
+
+@bgcolor=qw(#CCFFFF #FFFFCC);
+
+%ru = (
+		 9002 => "Retn",
+		 8492 => "OBIT",
+		 3216 => "Golden Telecom",
+		12389 => "Rostelecom",
+		20485 => "TransTelecom",
+		 3267 => "RUNNet",
+		 6854 => "Synterra",
+		 8342 => "RTComm",
+		 8359 => "MTU Intell",
+		 8732 => "Comcor",
+		 8744 => "StartTelecom",
+		 3277 => "RusNet",
+		39792 => "Anders B.G.",
+		 8402 => "Corbina",
+		12695 => "Dinet",
+		25478 => "IHome",
+		 2854 => "Equant Moscow",
+		28809 => "NaukaNet",
+		21127 => "ZapSibTTK",
+		29648 => "Comline",
+		21414 => "RusComNet",
+		20764 => "Rascom",
+		29076 => "CityTelecom",
+		16083 => "Stack",
+		41440 => "SibirTelecom",
+		44237 => "CTC Core",
+		24739 => "Severen",
+		30751 => "Eurotel",
+		34726 => "Saltar Telecom",
+		31133 => "Megafon",
+		 8997 => "SpbNit",
+		43975 => "VolgaTelecom",
+		 2118 => "Relcom",
+		 5568 => "RBNet",
+		35400 => "MFIST (USI)",
+		30960 => "Tetra",
+		12772 => "Enforta",
+		12714 => "NetByNet",
+		28917 => "Fiord",
+		 3058 => "RAS"
+      );
+%ua = (
+		21219 => "Datagroup",
+		 3255 => "Uarnet",
+		13249 => "ITSystems",
+		15772 => "WNet",
+		35320 => "ETT",
+		 6849 => "UkrTelecom",
+		25229 => "Volia",
+		12883 => "Ucomline"
+      );
+
+#    1.  3356 L3               5138898 146101 18801  2431
+
+print '<table border="1"><tr bgcolor="#555555">';
+headtd('Rank', 'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+print "</tr>\n";
+$i=0;
+while (<>) {
+	next unless /^\s*(\d+)\.\s*(\d+) ............... \s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/;
+	($rank, $asn, $n24, $npref, $nas, $degree) = ($1, $2, $3, $4, $5, $6);
+	next unless ($ru{$asn} || $ua{$asn});
+	next if $rank>=1000;
+	$i++;
+	$name = $ru{$asn} ? $ru{$asn} : $ua{$asn};
+	$name =~ s/\s/&nbsp;/g;
+	$n24 = "$1&nbsp;$2" if $n24 =~ /(\d\d+)(\d\d\d)$/;
+	printf('<tr bgcolor=%s><td align=right>&nbsp;%d&nbsp;</td>', $bgcolor[$ru{$asn} ? 1 : 0], $rank);
+	printf('<td align=right>&nbsp;%s&nbsp;</td><td>&nbsp;%s&nbsp;</td>', $asn, $name);
+	printf('<td align=center>%s</td><td align=right>&nbsp;%s&nbsp;</td>', $ru{$asn} ? "RU" : "UA", $n24);
+	printf('<td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td></tr>%s',
+	       $npref, $nas, $degree, "\n");
+}
+printf("</table>\n\n");
+
+sub chspace
+{
+	$_[0] =~ s/\s/&nbsp;/g;
+	return $_[0];
+}
+
+sub headtd
+{
+	print '<td align="center"><font color="#FFFFFF">&nbsp;' . chspace("$_") . '&nbsp;</font></td>' foreach @_;
+}
