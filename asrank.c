@@ -31,19 +31,13 @@ struct aspath {
 	struct aspath **next;
 } rootpath;
 
-struct aspath rootpath;
-
 struct rib_t {
-	struct rib_t *next;
-#ifdef SAVE_PREFIX
-	uint32_t prefix;	/* needed only for debug */
-#endif
-	u_char preflen;
+	struct rib_t *left, *right;
 	u_char npathes;
 	struct rib_pathes {
 		struct aspath *path;
 	} pathes[0];
-} *rib_head;
+} *rib_root;
 
 void debug(int level, char *format, ...);
 
@@ -64,8 +58,9 @@ struct coneas_t {
 	int nas;
 	int *asn;
 } *coneas;
-int nas, ntier1, ntier1_hints, inv_pathes, fullview, nupstreams;
+int nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes, nupstreams;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
+uint32_t mask[24];
 
 static void usage(void)
 {
@@ -321,6 +316,93 @@ static void make_rel1(asn_t *aspath, int pathlen)
 	}
 }
 
+static int collect_stats(struct rib_t *route, int preflen)
+{
+	static asn_t route_aspath[MAXPATHLEN];
+	static uint32_t curip;
+	int nets;
+	/* following vars can be not local in this recursive function */
+	/* but recursion depth is not high (only 24), so I think this local vars are ok */
+	int i, j, aspathlen, jlast, crel, inc;
+	struct aspath *pt;
+	
+	nets = 0;
+	if (route->left)
+		nets += collect_stats(route->left, preflen+1);
+	if (route->right) {
+		curip |= mask[preflen];
+		nets += collect_stats(route->right, preflen+1);
+		curip &= ~mask[preflen];
+	}
+	if (!route->npathes)
+		return nets;
+	nets = (1<<(24-preflen)) - nets; /* value of the current route */
+	for (i=0; i<route->npathes; i++) {
+		aspathlen = 0;
+		for (pt = route->pathes[i].path; pt->asn; pt = pt->prev)
+			route_aspath[aspathlen++] = pt->asn;
+		/* aspath is in reverse order! */
+		jlast = 0;
+		inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
+		for (j=1; j<aspathlen; j++) {
+			mkrel(route_aspath[j], route_aspath[j-1], 0); /* define */
+			crel = mkrel(route_aspath[j-1], route_aspath[j], 0);
+			if (crel>0) {
+				if (inc == 1)
+					jlast = j;
+				else
+					inc = -1;
+			}
+			else if (crel<0) {
+				if (inc != -1) inc = 2;
+			}
+		}
+		for (j=0; j<=jlast; j++) {
+			addconeas(asndx(route_aspath[j]), route_aspath[0]);
+			if (upstreams[asndx(route_aspath[j])] == 0) {
+				upstreams[asndx(route_aspath[j])] = 1;
+				upstreams_arr[nupstreams++] = asndx(route_aspath[j]);
+			}
+		}
+		if (debuglevel >= 3) {
+			/* revert aspath direction */
+			static char pathstr[MAXPATHLEN*6];
+			char *p;
+			asn_t tmp_asn;
+
+			for (j=aspathlen/2-1; j>=0; j--) {
+				tmp_asn = route_aspath[j];
+				route_aspath[j] = route_aspath[aspathlen-1-j];
+				route_aspath[aspathlen-1-j] = tmp_asn;
+			}
+			/* make aspath string */
+			p = pathstr;
+			for (j=0; j<aspathlen; j++) {
+				if (j) {
+					crel = mkrel(route_aspath[j-1], route_aspath[j], 0);
+					if (crel>0)
+						*p++ = '>';
+					else if (crel<0)
+						*p++ = '<';
+					else
+						*p++ = '-';
+				}
+				strcpy(p, printas(ntohl(route_aspath[j])));
+				p += strlen(p);
+			}
+			if (inc == -1) strcpy(p, " (!)");
+			debug(3, "%s/%d: %s", printip(curip), preflen, pathstr);
+		}
+	}
+	for (i=0; i<nupstreams; i++) {
+		n24[upstreams_arr[i]] += nets;
+		npref[upstreams_arr[i]]++;
+		upstreams[upstreams_arr[i]] = 0;
+	}
+	nupstreams = 0;
+	return (1<<(24-preflen));
+}
+
 static int cmpas(const void *as1, const void *as2)
 {
 	return n24[*(int *)as2] - n24[*(int *)as1];
@@ -332,9 +414,7 @@ int main(int argc, char *argv[])
 	char *p;
 	FILE *f;
 	struct dump_entry entry;
-	int aspathes;
 	asn_t asn;
-	struct rib_t *prefix, *prevprefix;
 
 	while ((ch = getopt(argc, argv, "sd:ht:n:p")) != -1) {
 		switch (ch) {
@@ -370,26 +450,33 @@ int main(int argc, char *argv[])
 		if (f != stdin) fclose(f);
 		exit(1);
 	}
+	for (i=0; i<24; i++)
+		mask[i] = htonl(1u<<(31-i));
+
 	debug(1, "Parsing input file");
-	aspathes = 0;
 	while (read_dump(f, &entry) == 0) {
 		int norigins;
 		int origins[MAXPATHES];
+		struct rib_t *prefix, **pprefix;
 
 		if (entry.preflen > 24 || entry.preflen == 0)
 			continue;
 		norigins = 0;
-		prefix = malloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
-		if (rib_head)
-			prevprefix->next = prefix;
+		pprefix = &rib_root;
+		for (i=0; i<entry.preflen; i++) {
+			if (*pprefix == NULL)
+				*pprefix = calloc(1, sizeof(struct rib_t));
+			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
+		}
+		if (*pprefix && pprefix[0]->npathes) {
+			warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
+			continue;
+		}
+		if (*pprefix)
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
 		else
-			rib_head = prefix;
-		prevprefix = prefix;
-#ifdef SAVE_PREFIX
-		prefix->prefix = entry.prefix;
-#endif
-		prefix->preflen = entry.preflen;
-		prefix->npathes = 0;
+			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes), 1);
+		prefix = *pprefix;
 		for (i=0; i<entry.pathes; i++) {
 			int pathlen;
 			asn_t path[MAXPATHLEN];
@@ -490,7 +577,10 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (f != stdin) fclose(f);
-	if (progress) printf("\n");
+	if (progress) {
+		printf("\n");
+		fflush(stdout);
+	}
 	freeas(&origin);
 	freeas(&wasas);
 	debug(1, "RIB table parsed, %d prefixes, %d pathes", fullview, aspathes);
@@ -575,87 +665,16 @@ int main(int argc, char *argv[])
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
 
-	/* ok, now calculate rating */
+	/* calculate rating */
 	n24 = calloc(nas, sizeof(*n24));
 	npref = calloc(nas, sizeof(*npref));
 	coneas = calloc(nas, sizeof(*coneas));
 	upstreams = calloc(nas, sizeof(*upstreams));
 	upstreams_arr = calloc(nas, sizeof(*upstreams_arr));
 	nupstreams = 0;
-	for (prefix = rib_head; prefix; prefix = prefix->next) {
-		for (i=0; i<prefix->npathes; i++) {
-			int aspathlen, jlast, crel, inc;
-			struct aspath *pt;
-			asn_t aspath[MAXPATHLEN];
+	collect_stats(rib_root, 0);
 
-			aspathlen = 0;
-			for (pt = prefix->pathes[i].path; pt->asn; pt = pt->prev) {
-				aspath[aspathlen++] = pt->asn;
-			}
-			/* aspath is in reverse order! */
-			jlast = 0;
-			inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
-			for (j=1; j<aspathlen; j++) {
-				mkrel(aspath[j], aspath[j-1], 0); /* define */
-				crel = mkrel(aspath[j-1], aspath[j], 0);
-				if (crel>0) {
-					if (inc == 1)
-						jlast = j;
-					else
-						inc = -1;
-				}
-				else if (crel<0) {
-					if (inc != -1) inc = 2;
-				}
-			}
-			for (j=0; j<=jlast; j++) {
-				addconeas(asndx(aspath[j]), aspath[0]);
-				if (upstreams[asndx(aspath[j])] == 0) {
-					upstreams[asndx(aspath[j])] = 1;
-					upstreams_arr[nupstreams++] = asndx(aspath[j]);
-				}
-			}
-			if (debuglevel >= 3) {
-				/* revert aspath direction */
-				asn_t tmp_asn;
-				char pathstr[MAXPATHLEN*6], *p;
-
-				for (j=aspathlen/2-1; j>=0; j--) {
-					tmp_asn = aspath[j];
-					aspath[j] = aspath[aspathlen-1-j];
-					aspath[aspathlen-1-j] = tmp_asn;
-				}
-				/* make aspath string */
-				p = pathstr;
-				for (j=0; j<aspathlen; j++) {
-					if (j) {
-						crel = mkrel(aspath[j-1], aspath[j], 0);
-						if (crel>0)
-							*p++ = '>';
-						else if (crel<0)
-							*p++ = '<';
-						else
-							*p++ = '-';
-					}
-					strcpy(p, printas(ntohl(aspath[j])));
-					p += strlen(p);
-				}
-				if (inc == -1) strcpy(p, " (!)");
-#ifdef SAVE_PREFIX
-				debug(3, "%s/%d: %s", printip(prefix->prefix), prefix->preflen, pathstr);
-#else
-				debug(3, "?.?.?.?/%d: %s", prefix->preflen, pathstr);
-#endif
-			}
-		}
-		for (i=0; i<nupstreams; i++) {
-			n24[upstreams_arr[i]] += (1<<(24-prefix->preflen));
-			npref[upstreams_arr[i]]++;
-			upstreams[upstreams_arr[i]] = 0;
-		}
-		nupstreams = 0;
-	}
-	/* Ok, now sort and output statistics */
+	/* sort and output statistics */
 	free(upstreams);
 	asorder = calloc(nas, sizeof(*asorder));
 	for (i=0; i<nas; i++)
@@ -681,6 +700,7 @@ void debug(int level, char *format, ...)
 	vsnprintf(buf, sizeof(buf), format, ap);
 	va_end(ap);
 	printf("%s %s\n", buftime, buf);
+	if (level <= 2) fflush(stdout);
 }
 
 void warning(char *format, ...)
