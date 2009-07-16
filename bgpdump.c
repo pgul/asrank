@@ -7,9 +7,11 @@
 
 #define BGPDUMP_TYPE_MRTD_BGP		 5
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP	12
+#define BGPDUMP_TYPE_ZEBRA_BGP		16
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_PEER_INDEX_TABLE	((13ul << 16) | 1)
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST	((13ul << 16) | 2)
-#define	BGPDUMP_TYPE_ZEBRA_BGP		16
+#define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP		((12ul << 16) | 1)
+#define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS	((12ul << 16) | 3)
 
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AFI_IP6	1
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4	2
@@ -51,13 +53,86 @@ static int get_buf(struct buf_t *buf, int len, void *data)
 	return 0;
 }
 
+static int process_attr(int assize, uint32_t *aspath)
+{
+	uint16_t i16;
+	int attr_len, len, aspathlen;
+	u_char flag, type, aslen, i8;
+
+	if (get_buf(&buf, 2, &i16)) return 0;
+	if (i16 == 0) return 0;
+	attr_len = ntohs(i16);
+	while (attr_len >= 3) {
+		if (get_buf(&buf, 1, &flag)) break;
+		if (get_buf(&buf, 1, &type)) break;
+		attr_len -= 2;
+		if (flag & BGP_ATTR_FLAG_EXTLEN) {
+			if (attr_len<2) break;
+			if (get_buf(&buf, 2, &i16)) break;
+			len = ntohs(i16);
+			attr_len -= 2;
+		} else {
+			if (get_buf(&buf, 1, &i8)) break;
+			len = i8;
+			attr_len--;
+		}
+		if (attr_len < len) break;
+		attr_len -= len;
+		switch (type) {
+			case BGP_ATTR_AS_PATH:
+				aspathlen = 0;
+				while (len > 0) {
+					if (get_buf(&buf, 1, &type)) break;
+					if (get_buf(&buf, 1, &aslen)) break;
+					len -= 2;
+					if (aslen * assize > len) {
+						warning("Bad attr: aslen %d, len %d", aslen, len);
+						break;
+					}
+					/* ignore confederations */
+					if (type == AS_CONFED_SET || type == AS_CONFED_SEQUENCE) {
+						if (get_buf(&buf, assize*aslen, NULL)) break;
+						len -= assize*aslen;
+						continue;
+					}
+					if (type != AS_SET && type != AS_SEQUENCE) {
+						debug(2, "Unknown attr type %d ignored", type);
+						break;
+					}
+					if (aspathlen + aslen >= MAXPATHLEN) {
+						warning("Too long aspath: %d", aspathlen+aslen);
+						break;
+					}
+					/* process AS_SET as AS_SEQUENCE */
+					if (assize == 4) {
+						if (get_buf(&buf, 4*aslen, aspath+aspathlen))
+							break;
+					} else {
+						int i;
+						for (i=0; i<aslen; i++) {
+							if (get_buf(&buf, 2, &i16)) break;
+							aspath[aspathlen+i] = htonl(ntohs(i16));
+						}
+					}
+					aspathlen += aslen;
+					len -= assize*aslen;
+				}
+				if (get_buf(&buf, len, NULL)) break;
+				aspath[aspathlen] = 0;
+				continue;
+			default:get_buf(&buf, len, NULL); break;
+		}
+	}
+	return aspathlen ? 1 : 0;
+}
+
 int read_dump(FILE *f, struct dump_entry *entry)
 {
 	uint32_t i32, etype, elen;
 	uint16_t i16, entry_count;
 	static uint16_t peer_count;
-	u_char preflen, peer_type, i8, flag, type, aslen;
-	int attr_len, len, i, aspathlen;
+	u_char preflen, peer_type;
+	int i, assize;
 
 	for (;;) {
 		if (fread(&i32,   4, 1, f) != 1) return -1; /* time */
@@ -73,7 +148,10 @@ int read_dump(FILE *f, struct dump_entry *entry)
 			}
 			buf.bufsize = buf.len;
 		}
-		if (fread(buf.data, 1, buf.len, f) != buf.len) return -1;
+		if (fread(buf.data, 1, buf.len, f) != buf.len) {
+			error("Unexpected EOF");
+			return -1;
+		}
 		etype = ntohl(etype);
 		switch (etype) {
 			case BGPDUMP_TYPE_TABLE_DUMP_V2_PEER_INDEX_TABLE:
@@ -92,10 +170,10 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					else
 						get_buf(&buf, 4, NULL);	/* peer IP */
 					if (peer_type & BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4) {
-						if (get_buf(&buf, 4, &i32)) break;
-						peer[i].as = ntohl(i32);
+						if (get_buf(&buf, 4, &(peer[i].as))) break;
 					} else {
-						if (get_buf(&buf, 2, &(peer[i].as))) break;
+						if (get_buf(&buf, 2, &i16)) break;
+						peer[i].as = htonl(ntohs(i16));
 					}
 				}
 				peer_count = i;
@@ -119,69 +197,34 @@ int read_dump(FILE *f, struct dump_entry *entry)
 						warning("Too big peer index %d", i16);
 					get_buf(&buf, 4, NULL);	/* originated time */
 					/* process attribute */
-					if (get_buf(&buf, 2, &i16)) break;
-					if (i16 == 0) continue;
-					attr_len = ntohs(i16);
-					while (attr_len >= 3) {
-						if (get_buf(&buf, 1, &flag)) break;
-						if (get_buf(&buf, 1, &type)) break;
-						attr_len -= 2;
-						if (flag & BGP_ATTR_FLAG_EXTLEN) {
-							if (attr_len<2) break;
-							if (get_buf(&buf, 2, &i16)) break;
-							len = ntohs(i16);
-							attr_len -= 2;
-						} else {
-							if (get_buf(&buf, 1, &i8)) break;
-							len = i8;
-							attr_len--;
+					if (process_attr(4, entry->aspath[entry->pathes]) == 1) {
+						if (entry->pathes >= MAXPATHES) {
+							warning("Too many aspath for prefix, rest ignored");
+							break;
 						}
-						if (attr_len < len) break;
-						attr_len -= len;
-						switch (type) {
-							case BGP_ATTR_AS_PATH:
-								if (entry->pathes >= MAXPATHES) {
-									warning("Too many aspath for prefix, rest ignored");
-									get_buf(&buf, len, NULL);
-									break;
-								}
-								aspathlen = 0;
-								while (len > 0) {
-									if (get_buf(&buf, 1, &type)) break;
-									if (get_buf(&buf, 1, &aslen)) break;
-									len -= 2;
-									if (aslen * 4 > len) {
-										warning("Bad attr: aslen %d, len %d", aslen, len);
-										break;
-									}
-									/* ignore confederations */
-									if (type == AS_CONFED_SET || type == AS_CONFED_SEQUENCE) {
-										if (get_buf(&buf, 4*aslen, NULL)) break;
-										len -= 4*aslen;
-										continue;
-									}
-									if (type != AS_SET && type != AS_SEQUENCE) {
-										debug(2, "Unknown attr type %d ignored", type);
-										break;
-									}
-									if (aspathlen + aslen >= MAXPATHLEN) {
-										warning("Too long aspath: %d", aspathlen+aslen);
-										break;
-									}
-									/* process AS_SET as AS_SEQUENCE */
-									if (get_buf(&buf, 4*aslen, entry->aspath[entry->pathes]+aspathlen))
-										break;
-									aspathlen += aslen;
-									len -= 4*aslen;
-								}
-								if (get_buf(&buf, len, NULL)) break;
-								entry->aspath[entry->pathes][aspathlen] = 0;
-								entry->pathes++;
-								break;
-							default:get_buf(&buf, len, NULL); break;
-						}
+						entry->pathes++;
 					}
 				}
+				if (entry->pathes == 0) continue;
+				return 0;
+			case BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP:
+			case BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS:
+				if (get_buf(&buf, 4, NULL)) break;	/* view, sequence */
+				if (get_buf(&buf, 4, &entry->prefix)) break;
+				if (get_buf(&buf, 1, &preflen)) break;
+				entry->preflen = preflen;
+				if (get_buf(&buf, 9, NULL)) break; /* status, time, peer_ip */
+				if (etype == BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS) {
+					assize = 4;
+					get_buf(&buf, 4, &(entry->origas[0]));
+				} else {
+					assize = 2;
+					get_buf(&buf, 2, &i16);
+					entry->origas[0] = htonl(ntohs(i16));
+				}
+				if (process_attr(assize, entry->aspath[0]) != 1)
+					continue;
+				entry->pathes = 1;
 				return 0;
 			default:error("Unsupported format: type %d, subtype %d", etype>>16, etype & 0xffff);
 				return 1;

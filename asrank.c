@@ -108,6 +108,7 @@ char *printas(asn_t asn)
 {
 	static char printasbuf[20];
 
+	asn = ntohl(asn);
 	if (asn < 65536)
 		snprintf(printasbuf, sizeof(printasbuf)-1, "%u", asn);
 	else
@@ -124,7 +125,7 @@ char *printaspath(asn_t *aspath, int aspathlen)
 	p = printaspathbuf;
 	for (i=0; i<aspathlen; i++) {
 		if (i) *p++ = ' ';
-		strcpy(p, printas(ntohl(aspath[i])));
+		strcpy(p, printas(aspath[i]));
 		p += strlen(p);
 	}
 	return printaspathbuf;
@@ -388,7 +389,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 					else
 						*p++ = '-';
 				}
-				strcpy(p, printas(ntohl(route_aspath[j])));
+				strcpy(p, printas(route_aspath[j]));
 				p += strlen(p);
 			}
 			if (inc == -1) strcpy(p, " (!)");
@@ -469,14 +470,34 @@ int main(int argc, char *argv[])
 				*pprefix = calloc(1, sizeof(struct rib_t));
 			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 		}
-		if (*pprefix && pprefix[0]->npathes) {
+		if (!*pprefix)
+			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes), 1);
+		else if (pprefix[0]->npathes == 0)
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
+		else if (entry.pathes > 1) {
 			warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
 			continue;
+		} else {
+			/* neighbor AS already exists for this prefix? */
+			for (i=0; i<pprefix[0]->npathes; i++) {
+				uint32_t firstas;
+				struct aspath *pas;
+
+				firstas = 0;
+				for (pas = pprefix[0]->pathes[i].path; pas->asn; pas=pas->prev)
+					firstas = pas->asn;
+				if (firstas == entry.aspath[0][0])
+					break;
+			}
+			if (i<pprefix[0]->npathes)
+				continue;
+			/* new origin, add it */
+			if (pprefix[0]->npathes >= MAXPATHES) {
+				warning("Too many pathes for %s/%d, rest ignored", printip(entry.prefix), entry.preflen);
+				continue;
+			}
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*sizeof(struct rib_pathes));
 		}
-		if (*pprefix)
-			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
-		else
-			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes), 1);
 		prefix = *pprefix;
 		for (i=0; i<entry.pathes; i++) {
 			int pathlen;
@@ -490,7 +511,7 @@ int main(int argc, char *argv[])
 				*p = '\0';
 				for (j=0; entry.aspath[i][j]; j++) {
 					if (j>0) *p++ = ' ';
-					strcpy(p, printas(ntohl(entry.aspath[i][j])));
+					strcpy(p, printas(entry.aspath[i][j]));
 					p += strlen(p);
 					if (p - aspath >= sizeof(aspath)-12)
 						break;
@@ -642,7 +663,7 @@ int main(int argc, char *argv[])
 			warning("Only specified Tier1 rest, but invalid pathes exists");
 			break;
 		}
-		debug(2, "%s is not tier1 (%d rate, %d pathes)", printas(ntohl(tier1_arr[maxndx])),
+		debug(2, "%s is not tier1 (%d rate, %d pathes)", printas(tier1_arr[maxndx]),
 		      tier1_bad[asndx(tier1_arr[maxndx])], npath[asndx(tier1_arr[maxndx])]);
 		for (i=0; i<ntier1; i++)
 			if (tier1_arr[i])
@@ -654,7 +675,7 @@ int main(int argc, char *argv[])
 	debug(1, "Tier1 list created");
 	for (i=0; i<ntier1; i++) {
 		if (tier1_arr[i])
-			debug(1, "  %s", printas(ntohl(tier1_arr[i])));
+			debug(1, "  %s", printas(tier1_arr[i]));
 	}
 
 	foreach_aspath(make_rel1);
@@ -682,7 +703,7 @@ int main(int argc, char *argv[])
 		asorder[i] = i;
 	qsort(asorder, nas, sizeof(*asorder), cmpas);
 	for (i=0; i<nas; i++)
-		printf("%5d. %7s  %9d  %7d  %5d %4d\n", i+1, printas(ntohl(asnum[asorder[i]])),
+		printf("%5d. %7s  %9d  %7d  %5d %4d\n", i+1, printas(asnum[asorder[i]]),
 		       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel);
 	return 0;
 }

@@ -1,6 +1,6 @@
 
 #define MAXPATHLEN	256
-#define MAXPATHES	256
+#define MAXPATHES	255
 
 struct dump_entry {
 	uint32_t prefix;
