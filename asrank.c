@@ -470,11 +470,13 @@ int main(int argc, char *argv[])
 				*pprefix = calloc(1, sizeof(struct rib_t));
 			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 		}
-		if (!*pprefix)
+		if (!*pprefix) {
 			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes), 1);
-		else if (pprefix[0]->npathes == 0)
+			fullview++;
+		} else if (pprefix[0]->npathes == 0) {
 			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
-		else if (entry.pathes > 1) {
+			fullview++;
+		} else if (entry.pathes > 1) {
 			warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
 			continue;
 		} else {
@@ -592,7 +594,6 @@ int main(int argc, char *argv[])
 		}
 		for (i=0; i<norigins; i++)
 			*as(&origin, origins[i]) = 0;
-		fullview++;
 		if (progress && fullview % 3000 == 0) {
 			printf("#");
 			fflush(stdout);
