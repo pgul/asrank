@@ -246,7 +246,8 @@ static void foreach_aspath_rec(struct aspath *aspath, void (*func)(asn_t *aspath
 		path[level] = aspath->next[i]->asn;
 		if (aspath->next[i]->leaf)
 			func(path, level+1);
-		foreach_aspath_rec(aspath->next[i], func, level+1);
+		if (level+1 < MAXPATHLEN)
+			foreach_aspath_rec(aspath->next[i], func, level+1);
 	}
 }
 
