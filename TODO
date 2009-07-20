@@ -1,4 +1,5 @@
 - улучшить алгоритм поиска tier1
+- aggregate
 - статистика по горизонтальным связям
 - statistics by updates (not by full rib tables)
 - asname & country list
