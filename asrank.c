@@ -26,8 +26,9 @@ struct aspath {
 	struct aspath *prev;
 	asn_t asn;
 	uint16_t nnei;
-	int pathes:24;
-	int leaf:8;
+	int pathes :30;
+	u_char leaf :1;
+	u_char noinv :1;
 	struct aspath **next;
 } rootpath;
 
@@ -279,11 +280,11 @@ static void foreach_aspath(void (*func)(asn_t *aspath, int pathlen))
 	foreach_aspath_rec(&rootpath, func, 0);
 }
 
-static void check_valid_path(asn_t *aspath, int pathlen)
+static int check_valid_path(asn_t *aspath, int pathlen)
 {
-	int i, seqlen;
+	int i, seqlen, ret;
 
-	seqlen = 0;
+	seqlen = ret = 0;
 	for (i=0; i<pathlen; i++) {
 		if (tier1[asndx(aspath[i])])
 			seqlen++;
@@ -292,6 +293,7 @@ static void check_valid_path(asn_t *aspath, int pathlen)
 				tier1_bad[asndx(aspath[i-1])]++;
 				tier1_bad[asndx(aspath[i-seqlen])]++;
 				inv_pathes++;
+				ret = 1;
 				if (debuglevel >= 4) {
 					char *p = strdup(printaspath(aspath+i-seqlen, seqlen));
 					debug(4, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), p);
@@ -305,13 +307,33 @@ static void check_valid_path(asn_t *aspath, int pathlen)
 		tier1_bad[asndx(aspath[i-1])]++;
 		tier1_bad[asndx(aspath[i-seqlen])]++;
 		inv_pathes++;
+		ret = 1;
 		if (debuglevel >= 4) {
 			char *p = strdup(printaspath(aspath+i-seqlen, seqlen));
 			debug(4, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), p);
 			free(p);
 		}
-
 	}
+	return ret;
+}
+
+static int check_valid_path_recurs(struct aspath *aspath, int level)
+{
+	static asn_t path[MAXPATHLEN];
+	int i, ret;
+
+	ret = 0;
+	for (i=0; i<aspath->nnei; i++) {
+		path[level] = aspath->next[i]->asn;
+		if (aspath->next[i]->leaf)
+			ret |= check_valid_path(path, level+1);
+		if (level+1 < MAXPATHLEN)
+			if (!aspath->next[i]->noinv)
+				ret |= check_valid_path_recurs(aspath->next[i], level+1);
+	}
+	if (!ret)
+		aspath->noinv = 1;
+	return ret;
 }
 
 static void make_rel1(asn_t *aspath, int pathlen)
@@ -674,7 +696,7 @@ int main(int argc, char *argv[])
 		double rate, maxrate;
 
 		inv_pathes = 0;
-		foreach_aspath(check_valid_path);
+		check_valid_path_recurs(&rootpath, 0);
 		if (inv_pathes == 0) break;
 		debug(2, "Found %d invalid pathes", inv_pathes);
 		/* remove one as from tier1 list */
