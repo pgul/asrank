@@ -34,9 +34,7 @@ struct aspath {
 struct rib_t {
 	struct rib_t *left, *right;
 	u_char npathes;
-	struct rib_pathes {
-		struct aspath *path;
-	} pathes[0];
+	struct aspath *pathes[0];
 } *rib_root;
 
 void debug(int level, char *format, ...);
@@ -367,7 +365,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	nets = (1<<(24-preflen)) - nets; /* value of the current route */
 	for (i=0; i<route->npathes; i++) {
 		aspathlen = 0;
-		for (pt = route->pathes[i].path; pt->asn; pt = pt->prev)
+		for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
 			route_aspath[aspathlen++] = pt->asn;
 		/* aspath is in reverse order! */
 		jlast = 0;
@@ -497,10 +495,10 @@ int main(int argc, char *argv[])
 			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 		}
 		if (!*pprefix) {
-			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes), 1);
+			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(pprefix[0]->pathes[0]), 1);
 			fullview++;
 		} else if (pprefix[0]->npathes == 0) {
-			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(struct rib_pathes));
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(pprefix[0]->pathes[0]));
 			fullview++;
 		} else if (entry.pathes > 1) {
 			warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
@@ -512,7 +510,7 @@ int main(int argc, char *argv[])
 				struct aspath *pas;
 
 				firstas = 0;
-				for (pas = pprefix[0]->pathes[i].path; pas->asn; pas=pas->prev)
+				for (pas = pprefix[0]->pathes[i]; pas->asn; pas=pas->prev)
 					firstas = pas->asn;
 				if (firstas == entry.aspath[0][0])
 					break;
@@ -524,7 +522,7 @@ int main(int argc, char *argv[])
 				warning("Too many pathes for %s/%d, rest ignored", printip(entry.prefix), entry.preflen);
 				continue;
 			}
-			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*sizeof(struct rib_pathes));
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*sizeof(pprefix[0]->pathes[0]));
 		}
 		prefix = *pprefix;
 		for (i=0; i<entry.pathes; i++) {
@@ -609,7 +607,7 @@ int main(int argc, char *argv[])
 				aspathes++;
 				curpath->leaf = 1;
 			}
-			prefix->pathes[prefix->npathes++].path = curpath;
+			prefix->pathes[prefix->npathes++] = curpath;
 			for (j=0; j<pathlen; j++) {
 				*as(&wasas, path[j]) = 0;
 				if (asndx(path[j]) == 0) {
