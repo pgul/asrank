@@ -232,8 +232,33 @@ static void maxroutes(struct aspath *aspath)
 		if (aspath->asn && aspath->next[i]->pathes > fullview/3) {
 			mkrel(aspath->asn, aspath->next[i]->asn, aspath->next[i]->pathes);
 			mkrel(aspath->next[i]->asn, aspath->asn, -aspath->next[i]->pathes);
+		} else {
+			mkrel(aspath->asn, aspath->next[i]->asn, 0);
+			mkrel(aspath->next[i]->asn, aspath->asn, 0);
 		}
 		maxroutes(aspath->next[i]);
+	}
+}
+
+static void add_tier1(struct aspath *aspath)
+{
+	int i;
+
+	for (i=0; i<aspath->nnei; i++) {
+		if (tier1[asndx(aspath->asn)] == 1 && tier1[asndx(aspath->next[i]->asn)] != 1) {
+			if (tier1[asndx(aspath->next[i]->asn)] == 0 &&
+			    proutes[asndx(aspath->next[i]->asn)] < fullview/2 &&
+			    routes[asndx(aspath->next[i]->asn)] > fullview/20 &&
+			    rel[asndx(aspath->next[i]->asn)].nas_rel > 20) {
+				if (ntier1 >= sizeof(tier1_arr)/sizeof(tier1_arr[0])) {
+					warning("Too many Tier1 candidates found");
+					break;
+				}
+				tier1_arr[ntier1++] = aspath->next[i]->asn;
+				tier1[asndx(aspath->next[i]->asn)] = 2;
+			}
+		} else
+			add_tier1(aspath->next[i]);
 	}
 }
 
@@ -622,7 +647,7 @@ int main(int argc, char *argv[])
 	tier1 = calloc(nas, sizeof(tier1[0]));
 	tier1_bad = calloc(nas, sizeof(tier1_bad[0]));
 	for (ntier1=0; ntier1<ntier1_hints; ntier1++)
-		tier1[asndx(tier1_arr[ntier1])] = ntier1+1;
+		tier1[asndx(tier1_arr[ntier1])] = 1;
 	for (i=0; i<nas; i++) {
 		if (ntier1 >= sizeof(tier1_arr)/sizeof(tier1_arr[0])) {
 			warning("Too many tier1 candidates found");
@@ -631,13 +656,17 @@ int main(int argc, char *argv[])
 		if (routes[i] > fullview/2 && proutes[i] < fullview/2) {
 			if (tier1[i] == 0) {
 				tier1_arr[ntier1++] = asnum[i];
-				tier1[i] = ntier1;
+				tier1[i] = 1;
 			}
 		}
 	}
 	free(routes);
 	free(proutes);
 	debug(1, "Found %d tier1 candidates", ntier1);
+
+	/* next AS after tier1 candidate is candidate also */
+	add_tier1(&rootpath);
+	debug(1, "Added candidated, now %d", ntier1);
 
 	npath = calloc(nas, sizeof(npath[0]));
 	foreach_aspath(get_npath);
