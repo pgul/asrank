@@ -25,10 +25,10 @@ typedef struct {
 struct aspath {
 	struct aspath *prev;
 	asn_t asn;
+	int pathes;
 	uint16_t nnei;
-	int pathes :30;
-	u_char leaf :1;
-	u_char noinv :1;
+	u_char leaf;
+	u_char noinv;
 	struct aspath **next;
 } rootpath;
 
@@ -453,7 +453,13 @@ static int collect_stats(struct rib_t *route, int preflen)
 
 static int cmpas(const void *as1, const void *as2)
 {
-	return n24[*(int *)as2] - n24[*(int *)as1];
+	if (n24[*(int *)as2] != n24[*(int *)as1])
+		return n24[*(int *)as2] - n24[*(int *)as1];
+	if (coneas[*(int *)as2].nas != coneas[*(int *)as1].nas)
+		return coneas[*(int *)as2].nas - coneas[*(int *)as1].nas;
+	if (npref[*(int *)as2] != npref[*(int *)as1])
+		return npref[*(int *)as2] - npref[*(int *)as1];
+	return rel[*(int *)as2].nas_rel - rel[*(int *)as1].nas_rel;
 }
 
 int main(int argc, char *argv[])
