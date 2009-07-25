@@ -1,4 +1,5 @@
 - статистика по горизонтальным связям
+- средняя длина fullview для каждого ISP
 - aggregate (many AS for one ISP)
 - statistics by updates (not by full rib tables)
 - asname & country list
