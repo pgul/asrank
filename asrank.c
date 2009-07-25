@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <time.h>
+#include <ctype.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -41,7 +42,7 @@ struct rib_t {
 void debug(int level, char *format, ...);
 
 asarr origin, wasas, ndx;
-int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *asorder;
+int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *asorder, *group;
 char *upstreams;
 int *upstreams_arr;
 asn_t *asnum;
@@ -60,16 +61,22 @@ struct coneas_t {
 int nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes, nupstreams;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
 uint32_t mask[24];
+int ngroups;
+struct {
+	int nas;
+	asn_t *asn;
+} *asgroup;
 
 static void usage(void)
 {
-	printf("Usage: asrank [-s] [-p] [-d level] [-n fname] [-t asn] [file]\n");
+	printf("Usage: asrank [-s] [-p] [-d level] [-n fname] [-t asn] [-g fname] [file]\n");
 	printf("  Options:\n");
 	printf("-s          - no euristic, use only strict relations\n");
 	printf("-t asn      - hint that asn is tier1\n");
 	printf("-d level    - set debug level\n");
 	printf("-p          - show progress bar\n");
-	printf("-n fname    - get AS names from fname (forman: \"asn: desc\")\n");
+	printf("-n fname    - get AS names from fname (format: \"asn: desc\")\n");
+	printf("-g fname    - file defined sibling groups, one group per line, comma separated\n");
 	printf("file - input dumb RIB table\n");
 }
 
@@ -370,7 +377,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	int nets;
 	/* following vars can be not local in this recursive function */
 	/* but recursion depth is not high (only 24), so I think this local vars are ok */
-	int i, j, aspathlen, jlast, crel, inc;
+	int i, j, aspathlen, jlast, crel, inc, ups;
 	struct aspath *pt;
 	
 	nets = 0;
@@ -393,7 +400,6 @@ static int collect_stats(struct rib_t *route, int preflen)
 		jlast = 0;
 		inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
 		for (j=1; j<aspathlen; j++) {
-			mkrel(route_aspath[j], route_aspath[j-1], 0); /* define */
 			crel = mkrel(route_aspath[j-1], route_aspath[j], 0);
 			if (crel>0) {
 				if (inc == 1)
@@ -406,10 +412,12 @@ static int collect_stats(struct rib_t *route, int preflen)
 			}
 		}
 		for (j=0; j<=jlast; j++) {
-			addconeas(asndx(route_aspath[j]), route_aspath[0]);
-			if (upstreams[asndx(route_aspath[j])] == 0) {
-				upstreams[asndx(route_aspath[j])] = 1;
-				upstreams_arr[nupstreams++] = asndx(route_aspath[j]);
+			ups = asndx(route_aspath[j]);
+			if (group[ups]) ups=asndx(asgroup[group[ups]-1].asn[0]);
+			addconeas(ups, route_aspath[0]);
+			if (upstreams[ups] == 0) {
+				upstreams[ups] = 1;
+				upstreams_arr[nupstreams++] = ups;
 			}
 		}
 		if (debuglevel >= 3) {
@@ -462,34 +470,61 @@ static int cmpas(const void *as1, const void *as2)
 	return rel[*(int *)as2].nas_rel - rel[*(int *)as1].nas_rel;
 }
 
+asn_t readasn(char *str)
+{
+	char *p;
+	asn_t asn;
+
+	if ((p=strchr(str, '.'))) {
+		*p = '\0';
+		asn = (atoi(str)<<16) + atoi(p+1);
+		*p = '.';
+	} else
+		asn = atoi(str);
+	return htonl(asn);
+}
+
 int main(int argc, char *argv[])
 {
 	int ch, i, j, k;
 	char *p;
 	FILE *f;
 	struct dump_entry entry;
-	asn_t asn;
+	char *groupfile;
+	char str[1024];
 
-	while ((ch = getopt(argc, argv, "sd:ht:n:p")) != -1) {
+	groupfile = NULL;
+	while ((ch = getopt(argc, argv, "sd:ht:n:pg:")) != -1) {
 		switch (ch) {
 			case 's':	strict = 1; break;
 			case 'd':	debuglevel = atoi(optarg); break;
 			case 'p':	progress = 1; break;
 			case 'h':	usage(); exit(0);
-			case 't':	if ((p=strchr(optarg, '.'))) {
-						*p++ = '\0';
-						asn = (atoi(optarg)<<16) + atoi(p);
-					} else
-						asn = atoi(optarg);
-					asn = htonl(asn);
-					tier1_arr[ntier1_hints++] = asn;
-					if (asndx(asn) == 0) {
-						nas++;
-						*as(&ndx, asn) = -1;
-					}
-					break;
+			case 't':	tier1_arr[ntier1_hints++] = readasn(optarg); break;
+			case 'g':	groupfile = strdup(optarg); break;
 			case 'n':	desc_fname = strdup(optarg); break;
 		}
+	}
+	if (groupfile) {
+		f = fopen(groupfile, "r");
+		if (f == NULL) {
+			error("Cannot open %s: %s", groupfile, strerror(errno));
+		} else {
+			while (fgets(str, sizeof(str), f)) {
+				if (!isdigit(str[0])) continue;
+				asgroup = realloc(asgroup, (ngroups+1) * sizeof(*asgroup));
+				for (i=0, p=str; *p; p++)
+					if (*p == ',') i++;
+				asgroup[ngroups].asn = calloc(sizeof(asn_t), i+1);
+				for (asgroup[ngroups].nas=0, p=strtok(str, ","); p; p=strtok(NULL, ",")) {
+					while (*p && isspace(*p)) p++;
+					asgroup[ngroups].asn[asgroup[ngroups].nas++] = readasn(p);
+				}
+				ngroups++;
+			}
+			fclose(f);
+		}
+		debug(3, "groups file %s read, %d groups found", groupfile, ngroups);
 	}
 	if (argv[optind] && strcmp(argv[optind], "-")) {
 		f = fopen(argv[optind], "r");
@@ -661,9 +696,23 @@ int main(int argc, char *argv[])
 	debug(1, "RIB table parsed, %d prefixes, %d pathes", fullview, aspathes);
 	/* foreach_aspath(printtree); */
 
+	/* group leaders should be indexed */
+	for (i=0; i<ngroups; i++) {
+		if (!asndx(asgroup[i].asn[0])) {
+			warning("No AS %s which listed in group %d", printas(asgroup[i].asn[0]), i);
+			*as(&ndx, asgroup[i].asn[0]) = -1;
+			nas++;
+		}
+	}
 	asnum = calloc(nas, sizeof(asn_t));
 	nas = 0;
 	foreach_aspath(fill_asndx);
+	for (i=0; i<ngroups; i++) {
+		if (asndx(asgroup[i].asn[0]) == -1) {
+			*as(&ndx, asgroup[i].asn[0]) = nas;
+			asnum[nas++] = asgroup[i].asn[0];
+		}
+	}
 
 	routes = calloc(nas, sizeof(routes[0]));
 	proutes = calloc(nas, sizeof(proutes[0]));
@@ -672,8 +721,12 @@ int main(int argc, char *argv[])
 	ntier1 = ntier1_hints;
 	tier1 = calloc(nas, sizeof(tier1[0]));
 	tier1_bad = calloc(nas, sizeof(tier1_bad[0]));
-	for (ntier1=0; ntier1<ntier1_hints; ntier1++)
-		tier1[asndx(tier1_arr[ntier1])] = 1;
+	for (ntier1=0; ntier1<ntier1_hints; ntier1++) {
+		if (asndx(tier1_arr[ntier1]) == 0 && asnum[0] != tier1_arr[ntier1])
+			warning("No AS %s, exclude from tier1 list", printas(tier1_arr[ntier1]));
+		else
+			tier1[asndx(tier1_arr[ntier1])] = 1;
+	}
 	for (i=0; i<nas; i++) {
 		if (ntier1 >= sizeof(tier1_arr)/sizeof(tier1_arr[0])) {
 			warning("Too many tier1 candidates found");
@@ -745,23 +798,87 @@ int main(int argc, char *argv[])
 	debug(1, "AS relations built");
 
 	/* calculate rating */
+	group = calloc(nas, sizeof(*group));
 	n24 = calloc(nas, sizeof(*n24));
 	npref = calloc(nas, sizeof(*npref));
 	coneas = calloc(nas, sizeof(*coneas));
 	upstreams = calloc(nas, sizeof(*upstreams));
 	upstreams_arr = calloc(nas, sizeof(*upstreams_arr));
 	nupstreams = 0;
+	for (i=0; i<ngroups; i++) {
+		for (j=0; j<asgroup[i].nas; j++) {
+			if (asndx(asgroup[i].asn[j]) != 0 || asnum[0] == asgroup[i].asn[j]) {
+				if (group[asndx(asgroup[i].asn[j])])
+					warning("AS %s included to more then one group", printas(asgroup[i].asn[j]));
+				else
+					group[asndx(asgroup[i].asn[j])] = i+1;
+			} else
+				warning("No AS %s which listed in group %d", printas(asgroup[i].asn[j]), i);
+		}
+	}
 	collect_stats(rib_root, 0);
+	free(upstreams);
+	debug(1, "Rating calculated");
+
+	/* calculate degree for groups */
+	if (ngroups) {
+		char *hasrel;
+		int *asrel;
+
+		hasrel = calloc(nas, sizeof(*hasrel));
+		asrel = calloc(nas, sizeof(*asrel)); /* too many, it's only list of neighbors */
+		for (i=0; i<ngroups; i++) {
+			int nasrel, relas;
+
+			nasrel = 0;
+			for (j=0; j<asgroup[i].nas; j++) {
+				if (asndx(asgroup[i].asn[j])==0 && asnum[0]!=asgroup[i].asn[j])
+					continue;
+				for (k=0; k<rel[asndx(asgroup[i].asn[j])].nas_rel; k++) {
+					relas = asndx(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn);
+					if (hasrel[relas] == 0) {
+						hasrel[relas] = 1;
+						asrel[nasrel++] = relas;
+					}
+				}
+			}
+			rel[asndx(asgroup[i].asn[0])].nas_rel = nasrel;
+			for (j=0; j<nasrel; j++)
+				hasrel[asrel[j]] = 0;
+		}
+		free(hasrel);
+		free(asrel);
+		debug(1, "degree for groups calculated");
+	}
+	for (i=0; i<nas; i++)
+		if (rel[i].as_rel) {
+			free(rel[i].as_rel);
+			rel[i].as_rel = NULL;
+		}
 
 	/* sort and output statistics */
-	free(upstreams);
 	asorder = calloc(nas, sizeof(*asorder));
+	debug(1, "AS list sorted");
 	for (i=0; i<nas; i++)
 		asorder[i] = i;
 	qsort(asorder, nas, sizeof(*asorder), cmpas);
-	for (i=0; i<nas; i++)
-		printf("%5d. %7s  %9d  %7d  %5d %4d\n", i+1, printas(asnum[asorder[i]]),
-		       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel);
+	for (i=0; i<nas; i++) {
+		if (group[asorder[i]]) {
+			if (asgroup[group[asorder[i]]-1].asn[0] != asnum[asorder[i]]) continue;
+			str[0] = 0;
+			p = str;
+			for (j=0; j<asgroup[group[asorder[i]]-1].nas; j++) {
+				if (p != str) *p++ = ',';
+				strcpy(p, printas(asgroup[group[asorder[i]]-1].asn[j]));
+				p += strlen(p);
+				if (p-str+15 >= sizeof(str)) break;
+			}
+			p = str;
+		} else
+			p = printas(asnum[asorder[i]]);
+		printf("%5d. %32s  %9d  %7d  %5d %4d\n", i+1, p,
+			       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel);
+	}
 	return 0;
 }
 
