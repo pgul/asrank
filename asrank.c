@@ -66,6 +66,7 @@ struct {
 	int nas;
 	asn_t *asn;
 } *asgroup;
+int horlinks, totier1, viatier1;
 
 static void usage(void)
 {
@@ -356,8 +357,15 @@ static void make_rel1(asn_t *aspath, int pathlen)
 				last = i+1;
 		}
 	}
-	if (!first) return;
+	if (!first) {
+		horlinks++;
+		return;
+	}
 	if (!last) last = first;
+	if (last == pathlen)
+		totier1++;
+	else if (first != 1)
+		viatier1++;
 	for (i=1; i<pathlen; i++) {
 		if (i+1<first || (i+1==first && last==first+1)) {
 			mkrel(aspath[i-1], aspath[i], 1);
@@ -796,6 +804,7 @@ int main(int argc, char *argv[])
 				rel[i].as_rel[j].val = 0;
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
+	debug(1, "%d pathes to tier1, %d pathes via tier1, %d pathes avoid tier1", totier1, viatier1, horlinks);
 
 	/* calculate rating */
 	group = calloc(nas, sizeof(*group));
