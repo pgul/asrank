@@ -6,7 +6,9 @@ struct dump_entry {
 	uint32_t prefix;
 	int preflen;
 	int pathes;
+	int withdraw;
 	uint32_t origas[MAXPATHES];
+	uint32_t peerip[MAXPATHES];
 	uint32_t aspath[MAXPATHES][MAXPATHLEN];
 };
 

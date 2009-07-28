@@ -12,6 +12,8 @@
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST	((13ul << 16) | 2)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP		((12ul << 16) | 1)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS	((12ul << 16) | 3)
+#define BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE			((16ul << 16) | 1)
+#define BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4		((16ul << 16) | 4)
 
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AFI_IP6	1
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4	2
@@ -19,10 +21,14 @@
 #define BGP_ATTR_AS_PATH	2
 #define BGP_ATTR_FLAG_EXTLEN	0x10
 
+#define BGP_ZEBRA_UPDATE	2
+
 #define AS_SET			1
 #define AS_SEQUENCE		2
 #define AS_CONFED_SEQUENCE	3
 #define AS_CONFED_SET		4
+
+#define AFI_IP			1
 
 static struct buf_t {
 	char *data;
@@ -33,7 +39,15 @@ static struct buf_t {
 
 static struct {
 	uint32_t as;
+	uint32_t ip;
 } *peer;
+
+static struct preflist {
+	int len;
+	uint32_t ip;
+} *announce, *withdraw;
+static int pref_ndx, pref_num, pref_max;
+static int wthdr_ndx, wthdr_num, wthdr_max;
 
 int open_dump(FILE *f)
 {
@@ -126,14 +140,58 @@ static int process_attr(int assize, uint32_t *aspath)
 	return aspathlen ? 1 : 0;
 }
 
+static int read_prefix_list(struct buf_t *buf, int len, struct preflist **preflist, int *preflist_size)
+{
+	u_char i8;
+	int n;
+	uint32_t i32;
+
+	n = 0;
+	while (len > 0) {
+		if (get_buf(buf, 1, &i8)) return n;
+		i32 = 0;
+		if (get_buf(buf, (i8+7)/8, &i32)) return n;
+		if (*preflist_size <= n) {
+			*preflist_size = (*preflist_size+4)*2;
+			*preflist = realloc(*preflist, *preflist_size * sizeof(**preflist));
+		}
+		preflist[0][n].len = i8;
+		preflist[0][n].ip  = i32;
+		n++;
+		len -= 1+(i8+7)/8;
+	}
+	return n;
+}
+
+static int read_next_update(struct dump_entry *entry)
+{
+	/* return filled entry structure! */
+	if (wthdr_ndx < wthdr_num) {
+		entry->preflen = withdraw[wthdr_ndx].len;
+		entry->prefix = withdraw[wthdr_ndx++].ip;
+		entry->withdraw = 1;
+		return 1;
+	}
+	if (pref_ndx < pref_num) {
+		entry->preflen = announce[pref_ndx].len;
+		entry->prefix = announce[pref_ndx++].ip;
+		entry->withdraw = 0;
+		return 1;
+	}
+	return 0;
+}
+
 int read_dump(FILE *f, struct dump_entry *entry)
 {
 	uint32_t i32, etype, elen;
 	uint16_t i16, entry_count;
 	static uint16_t peer_count;
-	u_char preflen, peer_type;
+	u_char preflen, peer_type, i8;
 	int i, assize;
+	u_char marker[16];
 
+	if (read_next_update(entry))
+		return 0;
 	for (;;) {
 		if (fread(&i32,   4, 1, f) != 1) return -1; /* time */
 		if (fread(&etype, 4, 1, f) != 1) return -1;
@@ -168,7 +226,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					if (peer_type & BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AFI_IP6)
 						get_buf(&buf, 16, NULL); /* peer IPv6 */ 
 					else
-						get_buf(&buf, 4, NULL);	/* peer IP */
+						get_buf(&buf, 4, &(peer[i].ip));
 					if (peer_type & BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4) {
 						if (get_buf(&buf, 4, &(peer[i].as))) break;
 					} else {
@@ -191,9 +249,10 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				for (i=0; i<entry_count; i++) {
 					if (get_buf(&buf, 2, &i16)) break;	/* peer index */
 					i16 = ntohs(i16);
-					if (i16 < peer_count)
+					if (i16 < peer_count) {
 						entry->origas[entry->pathes] = peer[i16].as;
-					else
+						entry->peerip[entry->pathes] = peer[i16].ip;
+					} else
 						warning("Too big peer index %d", i16);
 					get_buf(&buf, 4, NULL);	/* originated time */
 					/* process attribute */
@@ -206,6 +265,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					}
 				}
 				if (entry->pathes == 0) continue;
+				entry->withdraw = 0;
 				return 0;
 			case BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP:
 			case BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS:
@@ -213,7 +273,8 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				if (get_buf(&buf, 4, &entry->prefix)) break;
 				if (get_buf(&buf, 1, &preflen)) break;
 				entry->preflen = preflen;
-				if (get_buf(&buf, 9, NULL)) break; /* status, time, peer_ip */
+				if (get_buf(&buf, 5, NULL)) break; /* status, time */
+				if (get_buf(&buf, 4, &(entry->peerip[0]))) break;
 				if (etype == BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS) {
 					assize = 4;
 					get_buf(&buf, 4, &(entry->origas[0]));
@@ -225,7 +286,54 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				if (process_attr(assize, entry->aspath[0]) != 1)
 					continue;
 				entry->pathes = 1;
+				entry->withdraw = 0;
 				return 0;
+			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE:
+			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4:
+				if (etype == BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4) {
+					assize = 4;
+					get_buf(&buf, 4, &(entry->origas[0]));
+				} else {
+					assize = 2;
+					get_buf(&buf, 2, &i16);
+					entry->origas[0] = htonl(ntohs(i16));
+				}
+				if (get_buf(&buf, assize, NULL)) break;	/* dest as */
+				if (get_buf(&buf, 2, NULL)) break;	/* iface_index */
+				if (get_buf(&buf, 2, &i16)) break;
+				i16 = ntohs(i16);
+				if (i16 != AFI_IP) {
+					error("Unsupported address family 0x%04x, ignoring", i16);
+					continue;
+				}
+				if (get_buf(&buf, 4, &(entry->peerip[0]))) break;
+				if (get_buf(&buf, 4, NULL)) break;	/* dest_ip */
+				if (get_buf(&buf, 16, marker)) break;
+				if (memcmp(marker, "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 16)) {
+					error("bgp message: bad marker, ignoring");
+					continue;
+				}
+				if (get_buf(&buf, 2, &i16)) break;	/* message size */
+				if (get_buf(&buf, 1, &i8)) break;	/* message type */
+				if (i8 != BGP_ZEBRA_UPDATE) {
+					warning("Unknown BGP message type %d, ignoring", i8);
+					continue;
+				}
+				i16 = ntohs(i16) - 19;
+				if (buf.len-buf.pos != i16) {
+					error("bgp message bad length (%d != %d)", buf.len-buf.pos, i16);
+					continue;
+				}
+				if (get_buf(&buf, 2, &i16)) break;
+				wthdr_num = read_prefix_list(&buf, ntohs(i16), &withdraw, &wthdr_max);
+				process_attr(assize,  entry->aspath[0]);
+				pref_num = read_prefix_list(&buf, buf.len-buf.pos, &announce, &pref_max);
+				wthdr_ndx = pref_ndx = 0;
+				entry->pathes = 1;
+				if (read_next_update(entry))
+					return 0;
+				else
+					continue;
 			default:error("Unsupported format: type %d, subtype %d", etype>>16, etype & 0xffff);
 				return 1;
 		}

@@ -17,6 +17,7 @@ int debuglevel = 0;
 int progress = 0;
 char *desc_fname;
 typedef uint32_t asn_t;
+typedef u_char peerndx_t;
 
 typedef struct {
 	int as16[65536];
@@ -25,18 +26,23 @@ typedef struct {
 
 struct aspath {
 	struct aspath *prev;
-	asn_t asn;
-	int pathes;
-	uint16_t nnei;
-	u_char leaf;
-	u_char noinv;
 	struct aspath **next;
+	asn_t asn;
+	int pathes:24;
+	int noinv:8;
+	uint16_t nnei;
+	uint16_t leaf;
 } rootpath;
 
+int npeers;
+uint32_t *peers;
+
+#define peer(a)	((peerndx_t *)&((a)->pathes[(a)->npathes]))
 struct rib_t {
 	struct rib_t *left, *right;
 	u_char npathes;
 	struct aspath *pathes[0];
+	/* peerndx_t peer[]; */
 } *rib_root;
 
 void debug(int level, char *format, ...);
@@ -492,6 +498,33 @@ asn_t readasn(char *str)
 	return htonl(asn);
 }
 
+peerndx_t peerndx(uint32_t ip)
+{
+	int left, right, new;
+
+	left=0, right=npeers-1;
+	while (left <= right) {
+		new = (left+right)/2;
+		if (peers[new] > ip)
+			right = new-1;
+		else if (peers[new] < ip)
+			left = new+1;
+		else
+			break;
+	}
+	if (left > right) {
+		if ((peerndx_t)left == (peerndx_t)-1) {
+			error("Too many peers, increase sizeof(peerndx_t)");
+			return 0;
+		}
+		new = left;
+		peers = realloc(peers, ++npeers*sizeof(*peers));
+		bcopy(&(peers[new]), &(peers[new+1]), (npeers-new-1)*sizeof(*peers));
+		peers[new] = ip;
+	}
+	return (peerndx_t)new;
+}
+
 int main(int argc, char *argv[])
 {
 	int ch, i, j, k;
@@ -500,6 +533,7 @@ int main(int argc, char *argv[])
 	struct dump_entry entry;
 	char *groupfile;
 	char str[1024];
+	int progress_cnt;
 
 	groupfile = NULL;
 	while ((ch = getopt(argc, argv, "sd:ht:n:pg:")) != -1) {
@@ -535,7 +569,12 @@ int main(int argc, char *argv[])
 		debug(3, "groups file %s read, %d groups found", groupfile, ngroups);
 	}
 	if (argv[optind] && strcmp(argv[optind], "-")) {
-		f = fopen(argv[optind], "r");
+		if (strlen(argv[optind]) > 4 && strcmp(argv[optind]+strlen(argv[optind])-4, ".bz2") == 0) {
+			static char cmd[1024];
+			snprintf(cmd, sizeof(cmd)-1, "bunzip2 < %s |", argv[optind]);
+			f = popen(cmd, "r");
+		} else
+			f = fopen(argv[optind], "r");
 		if (f == NULL) {
 			fprintf(stderr, "Cannot open file %s: %s!\n", argv[optind], strerror(errno));
 			exit(1);
@@ -551,25 +590,105 @@ int main(int argc, char *argv[])
 		mask[i] = htonl(1u<<(31-i));
 
 	debug(1, "Parsing input file");
+	progress_cnt = 0;
 	while (read_dump(f, &entry) == 0) {
 		int norigins;
 		int origins[MAXPATHES];
 		struct rib_t *prefix, **pprefix;
+		struct aspath *ap, *prevap;
+
+		if (progress && ++progress_cnt % 3000 == 0) {
+			printf("#");
+			fflush(stdout);
+		}
 
 		if (entry.preflen > 24 || entry.preflen == 0)
 			continue;
+
 		norigins = 0;
 		pprefix = &rib_root;
 		for (i=0; i<entry.preflen; i++) {
-			if (*pprefix == NULL)
-				*pprefix = calloc(1, sizeof(struct rib_t));
+			if (*pprefix == NULL) {
+				if (entry.withdraw)
+					break;
+				else
+					*pprefix = calloc(1, sizeof(struct rib_t));
+			}
 			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 		}
-		if (!*pprefix) {
-			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*sizeof(pprefix[0]->pathes[0]), 1);
+		if (entry.withdraw) {
+			if (!*pprefix) {
+				debug(3, "Withdraw prefix not found: %s/%d from %s", printip(entry.prefix), entry.preflen, printas(entry.origas[0]));
+				continue;
+			}
+			for (i=0; i<pprefix[0]->npathes; i++)
+				if (peers[peer(*pprefix)[i]] == entry.peerip[0])
+					break;
+			if (i == pprefix[0]->npathes) {
+				debug(3, "Withdraw origin as %s for prefix %s/%d not found", printas(entry.origas[0]), printip(entry.prefix), entry.preflen);
+				continue;
+			}
+			if (debuglevel >= 6)
+				debug(6, "Withdraw %s/%d from %s found", printip(entry.prefix), entry.preflen, printas(entry.origas[0]));
+			ap = pprefix[0]->pathes[i];
+			if (ap->leaf == 0) {
+				error("Internal error in data structures (leaf==0 for existing prefix)");
+				continue;
+			}
+			if (--(ap->leaf) == 0)
+				aspathes--;
+			/* decrease pathes for each aspath objects in this path */
+			/* free unused aspath structures to delete withdrawed as relations */
+			while (ap && ap->asn) {
+				if (ap->pathes-- == 0) {
+					error("Internal error in data structures (path==0 for existing aspath), as%s", printas(ap->asn));
+					break;
+				}
+				prevap = ap->prev;
+				if (ap->pathes == 0) {
+					debug(5, "Free aspath");
+					if (ap->nnei || ap->next) {
+						error("Internal error in data structures (nnei==%d for unused aspath)", ap->nnei);
+						break;
+					}
+					if (prevap) {
+						if (!prevap->next) {
+							error("Internal error in data structures: asymmetric aspath tree");
+							break;
+						}
+						for (j=0; j<prevap->nnei; j++)
+							if (prevap->next[j] == ap)
+								break;
+						if (j == prevap->nnei) {
+							error("Internal error in data structures: asymmetric aspath tree");
+							break;
+						}
+						if (prevap->nnei == 1) {
+							free(prevap->next);
+							prevap->next = NULL;
+						} else
+							bcopy(&prevap->next[j+1], &prevap->next[j], (prevap->nnei-j-1)*sizeof(ap->next[0]));
+						prevap->nnei--;
+					}
+				}
+				ap = prevap;
+			}
+			pprefix[0]->npathes--;
+			bcopy(&pprefix[0]->pathes[i+1], &pprefix[0]->pathes[i], (pprefix[0]->npathes-i)*sizeof(pprefix[0]->pathes[0]));
+			bcopy(&pprefix[0]->pathes[pprefix[0]->npathes+1], &pprefix[0]->pathes[pprefix[0]->npathes], i*sizeof(peerndx_t));
+			bcopy((peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes+1]+i+1,
+			      (peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes]+i, (pprefix[0]->npathes-i)*sizeof(peerndx_t));
+			if (pprefix[0]->npathes == 0) {
+				debug(5, "Prefix %s/%d withdrawed", printip(entry.prefix), entry.preflen);
+				fullview--;
+			}
+			/* do not shrink allocated mamory and do not free prefix structure */
+			continue;
+		} else if (!*pprefix) {
+			*pprefix = calloc(sizeof(struct rib_t) + entry.pathes*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)), 1);
 			fullview++;
 		} else if (pprefix[0]->npathes == 0) {
-			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*sizeof(pprefix[0]->pathes[0]));
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)));
 			fullview++;
 		} else if (entry.pathes > 1) {
 			warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
@@ -593,7 +712,8 @@ int main(int argc, char *argv[])
 				warning("Too many pathes for %s/%d, rest ignored", printip(entry.prefix), entry.preflen);
 				continue;
 			}
-			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*sizeof(pprefix[0]->pathes[0]));
+			*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)));
+			bcopy(&pprefix[0]->pathes[pprefix[0]->npathes], &pprefix[0]->pathes[pprefix[0]->npathes+1], pprefix[0]->npathes*sizeof(peerndx_t));
 		}
 		prefix = *pprefix;
 		for (i=0; i<entry.pathes; i++) {
@@ -603,17 +723,8 @@ int main(int argc, char *argv[])
 			struct aspath *curpath;
 
 			if (debuglevel >= 6) {
-				char aspath[4096], *p;
-				p = aspath;
-				*p = '\0';
-				for (j=0; entry.aspath[i][j]; j++) {
-					if (j>0) *p++ = ' ';
-					strcpy(p, printas(entry.aspath[i][j]));
-					p += strlen(p);
-					if (p - aspath >= sizeof(aspath)-12)
-						break;
-				}
-				debug(6, "%s/%d|%s|%s", printip(entry.prefix), entry.preflen, printas(entry.origas[i]), aspath);
+				for (j=0; entry.aspath[i][j]; j++);
+				debug(6, "%s/%d|%s|%s", printip(entry.prefix), entry.preflen, printas(entry.origas[i]), printaspath(entry.aspath[i], j));
 			}
 			if (entry.pathes == 0 && debuglevel >= 6)
 				debug(6, "%s/%d|%s| <no data>", printip(entry.prefix), entry.preflen, printas(entry.origas[i]));
@@ -666,7 +777,7 @@ int main(int argc, char *argv[])
 					/* new */
 					curpath->next = realloc(curpath->next, ++(curpath->nnei) * sizeof(curpath->next[0]));
 					new = left;
-					bcopy(&(curpath->next[new]), &(curpath->next[new+1]), (curpath->nnei-new-1)*sizeof(curpath->next[0]));
+					bcopy(&(curpath->next[new]),&(curpath->next[new+1]),(curpath->nnei-new-1)*sizeof(curpath->next[0]));
 					curpath->next[new] = calloc(1, sizeof(curpath->next[0][0]));
 					curpath->next[new]->prev = curpath;
 					curpath->next[new]->asn = path[j];
@@ -674,11 +785,14 @@ int main(int argc, char *argv[])
 				curpath = curpath->next[new];
 				curpath->pathes++;
 			}
-			if (!curpath->leaf) {
+			if (!curpath->leaf)
 				aspathes++;
-				curpath->leaf = 1;
-			}
+			if (curpath->leaf == (1<<sizeof(curpath->leaf))-1)
+				error("Too many prefixes for same aspath, increase sizeof(leaf)!");
+			else
+				curpath->leaf++;
 			prefix->pathes[prefix->npathes++] = curpath;
+			peer(prefix)[prefix->npathes-1] = peerndx(entry.peerip[i]);
 			for (j=0; j<pathlen; j++) {
 				*as(&wasas, path[j]) = 0;
 				if (asndx(path[j]) == 0) {
@@ -689,10 +803,6 @@ int main(int argc, char *argv[])
 		}
 		for (i=0; i<norigins; i++)
 			*as(&origin, origins[i]) = 0;
-		if (progress && fullview % 3000 == 0) {
-			printf("#");
-			fflush(stdout);
-		}
 	}
 	if (f != stdin) fclose(f);
 	if (progress) {
@@ -916,7 +1026,9 @@ void warning(char *format, ...)
 	va_start(ap, format);
 	vsnprintf(buf, sizeof(buf), format, ap);
 	va_end(ap);
+	fflush(stdout);
 	fprintf(stderr, "%s\n", buf);
+	fflush(stderr);
 }
 
 void error(char *format, ...)
@@ -927,6 +1039,8 @@ void error(char *format, ...)
 	va_start(ap, format);
 	vsnprintf(buf, sizeof(buf), format, ap);
 	va_end(ap);
+	fflush(stdout);
 	fprintf(stderr, "%s\n", buf);
+	fflush(stderr);
 }
 
