@@ -76,7 +76,7 @@ int horlinks, totier1, viatier1;
 
 static void usage(void)
 {
-	printf("Usage: asrank [-s] [-p] [-d level] [-n fname] [-t asn] [-g fname] [file]\n");
+	printf("Usage: asrank [-s] [-p] [-d level] [-n fname] [-t asn] [-g fname] [-w fname] [file]\n");
 	printf("  Options:\n");
 	printf("-s          - no euristic, use only strict relations\n");
 	printf("-t asn      - hint that asn is tier1\n");
@@ -84,6 +84,7 @@ static void usage(void)
 	printf("-p          - show progress bar\n");
 	printf("-n fname    - get AS names from fname (format: \"asn: desc\")\n");
 	printf("-g fname    - file defined sibling groups, one group per line, comma separated\n");
+	printf("-w fname    - write result table to fname for future processing\n");
 	printf("file - input dumb RIB table\n");
 }
 
@@ -196,7 +197,7 @@ static void addconeas(int as1, asn_t as2)
 		coneas[as1].nas++;
 		coneas[as1].asn = realloc(coneas[as1].asn, coneas[as1].nas * sizeof(coneas[as1].asn[0]));
 		new = left;
-		bcopy(&(coneas[as1].asn[new]), &(coneas[as1].asn[new+1]), (coneas[as1].nas-new-1)*sizeof(coneas[as1].asn[0]));
+		bcopy(&(coneas[as1].asn[new]), &(coneas[as1].asn[new+1]), (coneas[as1].nas-new-1) * sizeof(coneas[as1].asn[0]));
 		coneas[as1].asn[new] = as2;
 	}
 }
@@ -222,7 +223,7 @@ static int mkrel(asn_t as1, asn_t as2, int val)
 		p->nas_rel++;
 		p->as_rel = realloc(p->as_rel, p->nas_rel * sizeof(p->as_rel[0]));
 		new = left;
-		bcopy(&(p->as_rel[new]), &(p->as_rel[new+1]), (p->nas_rel-new-1)*sizeof(p->as_rel[0]));
+		bcopy(&(p->as_rel[new]), &(p->as_rel[new+1]), (p->nas_rel-new-1) * sizeof(p->as_rel[0]));
 		p->as_rel[new].asn = as2;
 		p->as_rel[new].cnt = abs(val);
 		p->as_rel[new].val = val;
@@ -525,6 +526,118 @@ peerndx_t peerndx(uint32_t ip)
 	return (peerndx_t)new;
 }
 
+static void save_table_recurs(FILE *fout, struct rib_t *route, u_char preflen)
+{
+	static struct dump_entry entry;
+	static uint32_t curip;
+	int aspathlen, i, j, size;
+	struct aspath *pt;
+	uint32_t i32;
+	uint16_t i16;
+	u_char i8;
+	asn_t tmp_asn;
+
+	if (route == NULL) return;
+	if (route->left)
+		save_table_recurs(fout, route->left, preflen+1);
+	if (route->right) {
+		curip |= mask[preflen];
+		save_table_recurs(fout, route->right, preflen+1);
+		curip &= ~mask[preflen];
+	}
+	if (!route->npathes)
+		return;
+	size = 0;
+	for (i=0; i<route->npathes; i++) {
+		aspathlen = 0;
+		for (pt = route->pathes[i]; pt->asn; pt = pt->prev) {
+			tmp_asn = ntohl(pt->asn);
+			entry.aspath[i][aspathlen++] = tmp_asn;
+			if (tmp_asn < 0xf000)
+				size += 2;
+			else if (tmp_asn < 0xf0000)
+				size += 3;
+			else
+				size += 5;
+		}
+		entry.aspath[i][aspathlen] = 0;
+		if (aspathlen >= 255) {
+			error("Too long aspath trunkated");
+			entry.aspath[i][255] = 0;
+		}
+		/* revert aspath direction */
+		for (j=aspathlen/2-1; j>=0; j--) {
+			tmp_asn = entry.aspath[i][j];
+			entry.aspath[i][j] = entry.aspath[i][aspathlen-1-j];
+			entry.aspath[i][aspathlen-1-j] = tmp_asn;
+		}
+	}
+	i32 = htonl(time(NULL));
+	fwrite(&i32, 4, 1, fout);
+	i32 = htonl(BGPDUMP_TYPE_ASRANK_PREF);
+	fwrite(&i32, 4, 1, fout);
+	i32 = htonl(1+(preflen+7)/8+1+route->npathes*(npeers>=256 ? 3 : 2)+size);
+	fwrite(&i32, 4, 1, fout);
+	fwrite(&preflen, 1, 1, fout);
+	fwrite(&curip, 1, (preflen+7)/8, fout);
+	i8 = route->npathes;
+	fwrite(&i8, 1, 1, fout);
+	for (i=0; i<route->npathes; i++) {
+		if (npeers>=256) {
+			i16 = htons(peer(route)[i]);
+			fwrite(&i16, 2, 1, fout);
+		} else {
+			i8 = peer(route)[i];
+			fwrite(&i8, 1, 1, fout);
+		}
+		for (i8=0; entry.aspath[i][i8]; i8++);
+		fwrite(&i8, 1, 1, fout);
+		for (j=0; entry.aspath[i][j]; j++) {
+			if (entry.aspath[i][j] < 0xf000) {
+				i16 = htons(entry.aspath[i][j]);
+				fwrite(&i16, 2, 1, fout);
+			}
+			else if (entry.aspath[i][j] < 0xf0000) {
+				i8 = (entry.aspath[i][j] >> 16) | 0xf0;
+				fwrite(&i8, 1, 1, fout);
+				i16 = htons(entry.aspath[i][j] & 0xffff);
+				fwrite(&i16, 2, 1, fout);
+			} else {
+				i8 = 0xff;
+				fwrite(&i8, 1, 1, fout);
+				i32 = htonl(entry.aspath[i][j]);
+				fwrite(&i32, 4, 1, fout);
+			}
+		}
+	}
+}
+
+static void save_table(char *fname)
+{
+	FILE *fout;
+	uint32_t i32;
+	uint16_t i16;
+
+	fout=fopen(fname, "w");
+	if (fout == NULL) {
+		error("Cannot open %s: %s", fname, strerror(errno));
+		return;
+	}
+	/* write peer table */
+	i32 = htonl(time(NULL));
+	fwrite(&i32, 4, 1, fout);
+	i32 = htonl(BGPDUMP_TYPE_ASRANK_PEERLIST);
+	fwrite(&i32, 4, 1, fout);
+	i32 = htonl(2+npeers*4);
+	fwrite(&i32, 4, 1, fout);
+	i16 = htons(npeers);
+	fwrite(&i16, 2, 1, fout);
+	fwrite(peers, 4, npeers, fout);
+
+	save_table_recurs(fout, rib_root, 0);
+	fclose(fout);
+}
+
 int main(int argc, char *argv[])
 {
 	int ch, i, j, k;
@@ -534,9 +647,10 @@ int main(int argc, char *argv[])
 	char *groupfile;
 	char str[1024];
 	int progress_cnt;
+	char *save_fname;
 
-	groupfile = NULL;
-	while ((ch = getopt(argc, argv, "sd:ht:n:pg:")) != -1) {
+	save_fname = groupfile = NULL;
+	while ((ch = getopt(argc, argv, "sd:ht:n:pg:w:")) != -1) {
 		switch (ch) {
 			case 's':	strict = 1; break;
 			case 'd':	debuglevel = atoi(optarg); break;
@@ -545,6 +659,7 @@ int main(int argc, char *argv[])
 			case 't':	tier1_arr[ntier1_hints++] = readasn(optarg); break;
 			case 'g':	groupfile = strdup(optarg); break;
 			case 'n':	desc_fname = strdup(optarg); break;
+			case 'w':	save_fname = strdup(optarg); break;
 		}
 	}
 	if (groupfile) {
@@ -775,7 +890,7 @@ int main(int argc, char *argv[])
 				}
 				if (left > right) {
 					/* new */
-					curpath->next = realloc(curpath->next, ++(curpath->nnei) * sizeof(curpath->next[0]));
+					curpath->next = realloc(curpath->next, ++(curpath->nnei)*sizeof(curpath->next[0]));
 					new = left;
 					bcopy(&(curpath->next[new]),&(curpath->next[new+1]),(curpath->nnei-new-1)*sizeof(curpath->next[0]));
 					curpath->next[new] = calloc(1, sizeof(curpath->next[0][0]));
@@ -787,8 +902,8 @@ int main(int argc, char *argv[])
 			}
 			if (!curpath->leaf)
 				aspathes++;
-			if (curpath->leaf == (1<<sizeof(curpath->leaf))-1)
-				error("Too many prefixes for same aspath, increase sizeof(leaf)!");
+			if (curpath->leaf == (1ul<<(sizeof(curpath->leaf)*8))-1)
+				error("Too many prefixes for same aspath (%u), increase sizeof(leaf)!", curpath->leaf);
 			else
 				curpath->leaf++;
 			prefix->pathes[prefix->npathes++] = curpath;
@@ -998,6 +1113,11 @@ int main(int argc, char *argv[])
 		printf("%5d. %32s  %9d  %7d  %5d %4d\n", i+1, p,
 			       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel);
 	}
+	if (save_fname) {
+		debug(1, "Saving table to %s", save_fname);
+		save_table(save_fname);
+	}
+	debug(1, "All done");
 	return 0;
 }
 

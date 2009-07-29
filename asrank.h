@@ -18,3 +18,5 @@ void debug(int level, char *format, ...);
 void warning(char *format, ...);
 void error(char *format, ...);
 
+#define BGPDUMP_TYPE_ASRANK_PEERLIST	((71ul<<16) | 1)
+#define BGPDUMP_TYPE_ASRANK_PREF	((71ul<<16) | 2)

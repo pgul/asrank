@@ -186,8 +186,8 @@ int read_dump(FILE *f, struct dump_entry *entry)
 	uint32_t i32, etype, elen;
 	uint16_t i16, entry_count;
 	static uint16_t peer_count;
-	u_char preflen, peer_type, i8;
-	int i, assize;
+	u_char preflen, peer_type, i8, c;
+	int i, j, assize, aspathlen;
 	u_char marker[16];
 
 	if (read_next_update(entry))
@@ -219,7 +219,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				get_buf(&buf, 2, &peer_count);	/* peer count */
 				peer_count = ntohs(peer_count);
 				if (peer) free(peer);
-				peer = malloc(peer_count * sizeof(*peer));
+				peer = calloc(sizeof(*peer), peer_count);
 				for (i=0; i<peer_count; i++) {
 					if (get_buf(&buf, 1, &peer_type)) break;
 					get_buf(&buf, 4, NULL);	/* peer route-id */
@@ -235,6 +235,16 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					}
 				}
 				peer_count = i;
+				debug(3, "Peer index table processed, found %d peers", peer_count);
+				continue;
+			case BGPDUMP_TYPE_ASRANK_PEERLIST:
+				get_buf(&buf, 2, &i16);
+				peer_count = ntohs(i16);
+				if (peer) free(peer);
+				peer = calloc(sizeof(*peer), peer_count);
+				for (i=0; i<peer_count; i++)
+					if (get_buf(&buf, 4, &(peer[i].ip)))
+						break;
 				debug(3, "Peer index table processed, found %d peers", peer_count);
 				continue;
 			case BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST:
@@ -334,6 +344,45 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					return 0;
 				else
 					continue;
+			case BGPDUMP_TYPE_ASRANK_PREF:
+				if (get_buf(&buf, 1, &preflen)) break;
+				entry->preflen = preflen;
+				entry->prefix = 0;
+				if (get_buf(&buf, (preflen+7)/8, &entry->prefix)) break;
+				if (get_buf(&buf, 1, &i8)) break;
+				if (i8==0) continue;
+				entry->pathes = i8;
+				for (i=0; i<entry->pathes; i++) {
+					if (peer_count < 256) {
+						get_buf(&buf, 1, &i8);
+						j = i8;
+					} else {
+						get_buf(&buf, 2, &i16);
+						j = ntohs(i16);
+					}
+					if (j < peer_count)
+						entry->peerip[entry->pathes] = peer[j].ip;
+					else
+						error("Too big peer index");
+					if (get_buf(&buf, 1, &i8))
+						break;
+					aspathlen = i8;
+					for (j=0; j<aspathlen; j++) {
+						get_buf(&buf, 1, &i8);
+						if (i8 == 0xff) {
+							get_buf(&buf, 4, &entry->aspath[i][j]);
+						} else if (i8 < 0xf0) {
+							get_buf(&buf, 1, &c);
+							entry->aspath[i][j] = htonl(i8*256+c);
+						} else {
+							get_buf(&buf, 2, &i16);
+							entry->aspath[i][j] = htonl((i8 & 0xf) * 65536 + ntohs(i16));
+						}
+					}
+					entry->origas[i] = entry->aspath[i][0];
+					entry->aspath[i][j] = 0;
+				}
+				return 0;
 			default:error("Unsupported format: type %d, subtype %d", etype>>16, etype & 0xffff);
 				return 1;
 		}
