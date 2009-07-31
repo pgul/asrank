@@ -49,6 +49,7 @@ void debug(int level, char *format, ...);
 
 asarr origin, wasas, ndx;
 int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *asorder, *group;
+int *nuplinks, *npeerings;
 char *upstreams;
 int *upstreams_arr;
 asn_t *asnum;
@@ -241,14 +242,16 @@ static void maxroutes(struct aspath *aspath)
 	for (i=0; i<aspath->nnei; i++) {
 		if (routes[asndx(aspath->next[i]->asn)] < aspath->next[i]->pathes)
 			routes[asndx(aspath->next[i]->asn)] = aspath->next[i]->pathes;
-		if (aspath->asn && proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
-			proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
-		if (aspath->asn && aspath->next[i]->pathes > fullview/3) {
-			mkrel(aspath->asn, aspath->next[i]->asn, aspath->next[i]->pathes);
-			mkrel(aspath->next[i]->asn, aspath->asn, -aspath->next[i]->pathes);
-		} else {
-			mkrel(aspath->asn, aspath->next[i]->asn, 0);
-			mkrel(aspath->next[i]->asn, aspath->asn, 0);
+		if (aspath->asn) {
+			if (proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
+				proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
+			if (aspath->next[i]->pathes > fullview/3) {
+				mkrel(aspath->asn, aspath->next[i]->asn, aspath->next[i]->pathes);
+				mkrel(aspath->next[i]->asn, aspath->asn, -aspath->next[i]->pathes);
+			} else {
+				mkrel(aspath->asn, aspath->next[i]->asn, 0);
+				mkrel(aspath->next[i]->asn, aspath->asn, 0);
+			}
 		}
 		maxroutes(aspath->next[i]);
 	}
@@ -1023,10 +1026,21 @@ int main(int argc, char *argv[])
 
 	foreach_aspath(make_rel1);
 	/* if relations is less then 90% assurance, then discard it */
+	nuplinks = calloc(nas, sizeof(*nuplinks));
+	npeerings = calloc(nas, sizeof(*npeerings));
 	for (i=0; i<nas; i++)
-		for (j=0; j<rel[i].nas_rel; j++)
+		for (j=0; j<rel[i].nas_rel; j++) {
 			if (abs(rel[i].as_rel[j].val)*10 < rel[i].as_rel[j].cnt*9)
 				rel[i].as_rel[j].val = 0;
+			if (rel[i].as_rel[j].val > 0) {
+				char *p = strdup(printas(asnum[i]));
+				debug(5, "%s is uplink for %s", printas(rel[i].as_rel[j].asn), p);
+				free(p);
+				nuplinks[i]++;
+			}
+			else if (rel[i].as_rel[j].val == 0)
+				npeerings[i]++;
+		}
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
 	debug(1, "%d pathes to tier1, %d pathes via tier1, %d pathes avoid tier1", totier1, viatier1, horlinks);
@@ -1056,15 +1070,19 @@ int main(int argc, char *argv[])
 
 	/* calculate degree for groups */
 	if (ngroups) {
-		char *hasrel;
-		int *asrel;
+		char *hasrel, *hasuplink, *haspeering;
+		int *asrel, *asuplink, *aspeering;
 
 		hasrel = calloc(nas, sizeof(*hasrel));
 		asrel = calloc(nas, sizeof(*asrel)); /* too many, it's only list of neighbors */
+		hasuplink = calloc(nas, sizeof(*hasuplink));
+		asuplink = calloc(nas, sizeof(*asuplink)); /* too many, it's only list of neighbors */
+		haspeering = calloc(nas, sizeof(*haspeering));
+		aspeering = calloc(nas, sizeof(*aspeering)); /* too many, it's only list of neighbors */
 		for (i=0; i<ngroups; i++) {
-			int nasrel, relas;
+			int nasrel, relas, nasuplink, naspeering;
 
-			nasrel = 0;
+			nasrel = nasuplink = naspeering = 0;
 			for (j=0; j<asgroup[i].nas; j++) {
 				if (asndx(asgroup[i].asn[j])==0 && asnum[0]!=asgroup[i].asn[j])
 					continue;
@@ -1074,14 +1092,29 @@ int main(int argc, char *argv[])
 						hasrel[relas] = 1;
 						asrel[nasrel++] = relas;
 					}
+					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].val > 0 && hasuplink[relas] == 0) {
+						hasuplink[relas] = 1;
+						asuplink[nasuplink++] = relas;
+					}
+					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].val == 0 && haspeering[relas] == 0) {
+						haspeering[relas] = 1;
+						aspeering[naspeering++] = relas;
+					}
 				}
 			}
 			rel[asndx(asgroup[i].asn[0])].nas_rel = nasrel;
-			for (j=0; j<nasrel; j++)
-				hasrel[asrel[j]] = 0;
+			nuplinks[asndx(asgroup[i].asn[0])] = nasuplink;
+			npeerings[asndx(asgroup[i].asn[0])] = naspeering;
+			for (j=0; j<nasrel; j++) hasrel[asrel[j]] = 0;
+			for (j=0; j<nasuplink; j++) hasuplink[asrel[j]] = 0;
+			for (j=0; j<naspeering; j++) haspeering[asrel[j]] = 0;
 		}
 		free(hasrel);
 		free(asrel);
+		free(hasuplink);
+		free(asuplink);
+		free(haspeering);
+		free(aspeering);
 		debug(1, "degree for groups calculated");
 	}
 	for (i=0; i<nas; i++)
@@ -1110,8 +1143,9 @@ int main(int argc, char *argv[])
 			p = str;
 		} else
 			p = printas(asnum[asorder[i]]);
-		printf("%5d. %32s  %9d  %7d  %5d %4d\n", i+1, p,
-			       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel);
+		printf("%5d. %32s  %9d  %7d  %5d %4d %4d %4d\n", i+1, p,
+			       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel,
+		               nuplinks[asorder[i]], npeerings[asorder[i]]);
 	}
 	if (save_fname) {
 		debug(1, "Saving table to %s", save_fname);
