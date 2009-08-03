@@ -12,6 +12,8 @@
 #include <arpa/inet.h>
 #include "asrank.h"
 
+#define FORMAT "%32s  %9d  %7d  %5d %4d %4d %4d\n"
+
 int strict = 0;
 int debuglevel = 0;
 int progress = 0;
@@ -48,10 +50,11 @@ struct rib_t {
 void debug(int level, char *format, ...);
 
 asarr origin, wasas, ndx;
-int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *asorder, *group;
-int *nuplinks, *npeerings;
-char *upstreams;
-int *upstreams_arr;
+int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *group;
+int *n24_gr, *npref_gr, *group_rel;
+int *nuplinks, *npeerings, *nuplinks_gr, *npeering_gr;
+char *upstreams, *ups_group;
+int *upstreams_arr, *ups_group_arr;
 asn_t *asnum;
 struct rel_t {
 	int nas_rel;
@@ -64,8 +67,8 @@ struct rel_t {
 struct coneas_t {
 	int nas;
 	int *asn;
-} *coneas;
-int nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes, nupstreams;
+} *coneas, *coneas_gr;
+int nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
 uint32_t mask[24];
 int ngroups;
@@ -179,7 +182,7 @@ static void fill_asndx(asn_t *aspath, int pathlen)
 	}
 }
 
-static void addconeas(int as1, asn_t as2)
+static void addconeas(struct coneas_t *coneas, int as1, asn_t as2)
 {
 	int left, right, new;
 
@@ -396,6 +399,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	/* following vars can be not local in this recursive function */
 	/* but recursion depth is not high (only 24), so I think this local vars are ok */
 	int i, j, aspathlen, jlast, crel, inc, ups;
+	int nupstreams, nups_group;
 	struct aspath *pt;
 	
 	nets = 0;
@@ -410,6 +414,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	if (!route->npathes)
 		return nets;
 	nets = (1<<(24-preflen)) - nets; /* value of the current route */
+	nupstreams = nups_group = 0;
 	for (i=0; i<route->npathes; i++) {
 		aspathlen = 0;
 		for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
@@ -431,11 +436,18 @@ static int collect_stats(struct rib_t *route, int preflen)
 		}
 		for (j=0; j<=jlast; j++) {
 			ups = asndx(route_aspath[j]);
-			if (group[ups]) ups=asndx(asgroup[group[ups]-1].asn[0]);
-			addconeas(ups, route_aspath[0]);
+			addconeas(coneas, ups, route_aspath[0]);
 			if (upstreams[ups] == 0) {
 				upstreams[ups] = 1;
 				upstreams_arr[nupstreams++] = ups;
+			}
+			if (group[ups]) {
+				ups=group[ups]-1;
+				if (ups_group[ups] == 0) {
+					ups_group[ups] = 1;
+					ups_group_arr[nups_group++] = ups;
+				}
+				addconeas(coneas_gr, ups, route_aspath[0]);
 			}
 		}
 		if (debuglevel >= 3) {
@@ -473,19 +485,12 @@ static int collect_stats(struct rib_t *route, int preflen)
 		npref[upstreams_arr[i]]++;
 		upstreams[upstreams_arr[i]] = 0;
 	}
-	nupstreams = 0;
+	for (i=0; i<nups_group; i++) {
+		n24_gr[ups_group_arr[i]] += nets;
+		npref_gr[ups_group_arr[i]]++;
+		ups_group[ups_group_arr[i]] = 0;
+	}
 	return (1<<(24-preflen));
-}
-
-static int cmpas(const void *as1, const void *as2)
-{
-	if (n24[*(int *)as2] != n24[*(int *)as1])
-		return n24[*(int *)as2] - n24[*(int *)as1];
-	if (coneas[*(int *)as2].nas != coneas[*(int *)as1].nas)
-		return coneas[*(int *)as2].nas - coneas[*(int *)as1].nas;
-	if (npref[*(int *)as2] != npref[*(int *)as1])
-		return npref[*(int *)as2] - npref[*(int *)as1];
-	return rel[*(int *)as2].nas_rel - rel[*(int *)as1].nas_rel;
 }
 
 asn_t readasn(char *str)
@@ -1052,7 +1057,11 @@ int main(int argc, char *argv[])
 	coneas = calloc(nas, sizeof(*coneas));
 	upstreams = calloc(nas, sizeof(*upstreams));
 	upstreams_arr = calloc(nas, sizeof(*upstreams_arr));
-	nupstreams = 0;
+	ups_group = calloc(ngroups, sizeof(*ups_group));
+	ups_group_arr = calloc(ngroups, sizeof(*ups_group));
+	n24_gr = calloc(ngroups, sizeof(*n24_gr));
+	npref_gr = calloc(ngroups, sizeof(*npref_gr));
+	coneas_gr = calloc(ngroups, sizeof(*coneas_gr));
 	for (i=0; i<ngroups; i++) {
 		for (j=0; j<asgroup[i].nas; j++) {
 			if (asndx(asgroup[i].asn[j]) != 0 || asnum[0] == asgroup[i].asn[j]) {
@@ -1066,6 +1075,9 @@ int main(int argc, char *argv[])
 	}
 	collect_stats(rib_root, 0);
 	free(upstreams);
+	free(upstreams_arr);
+	free(ups_group);
+	free(ups_group_arr);
 	debug(1, "Rating calculated");
 
 	/* calculate degree for groups */
@@ -1075,6 +1087,9 @@ int main(int argc, char *argv[])
 
 		hasrel = calloc(nas, sizeof(*hasrel));
 		asrel = calloc(nas, sizeof(*asrel)); /* too many, it's only list of neighbors */
+		group_rel = calloc(ngroups, sizeof(*group_rel));
+		nuplinks_gr = calloc(ngroups, sizeof(*nuplinks_gr));
+		npeering_gr = calloc(ngroups, sizeof(*npeering_gr));
 		hasuplink = calloc(nas, sizeof(*hasuplink));
 		asuplink = calloc(nas, sizeof(*asuplink)); /* too many, it's only list of neighbors */
 		haspeering = calloc(nas, sizeof(*haspeering));
@@ -1102,9 +1117,9 @@ int main(int argc, char *argv[])
 					}
 				}
 			}
-			rel[asndx(asgroup[i].asn[0])].nas_rel = nasrel;
-			nuplinks[asndx(asgroup[i].asn[0])] = nasuplink;
-			npeerings[asndx(asgroup[i].asn[0])] = naspeering;
+			group_rel[i] = nasrel;
+			nuplinks_gr[i] = nasuplink;
+			npeering_gr[i] = naspeering;
 			for (j=0; j<nasrel; j++) hasrel[asrel[j]] = 0;
 			for (j=0; j<nasuplink; j++) hasuplink[asrel[j]] = 0;
 			for (j=0; j<naspeering; j++) haspeering[asrel[j]] = 0;
@@ -1123,34 +1138,27 @@ int main(int argc, char *argv[])
 			rel[i].as_rel = NULL;
 		}
 
-	/* sort and output statistics */
-	asorder = calloc(nas, sizeof(*asorder));
-	debug(1, "AS list sorted");
-	for (i=0; i<nas; i++)
-		asorder[i] = i;
-	qsort(asorder, nas, sizeof(*asorder), cmpas);
-	for (i=0; i<nas; i++) {
-		if (group[asorder[i]]) {
-			if (asgroup[group[asorder[i]]-1].asn[0] != asnum[asorder[i]]) continue;
-			str[0] = 0;
-			p = str;
-			for (j=0; j<asgroup[group[asorder[i]]-1].nas; j++) {
-				if (p != str) *p++ = ',';
-				strcpy(p, printas(asgroup[group[asorder[i]]-1].asn[j]));
-				p += strlen(p);
-				if (p-str+15 >= sizeof(str)) break;
-			}
-			p = str;
-		} else
-			p = printas(asnum[asorder[i]]);
-		printf("%5d. %32s  %9d  %7d  %5d %4d %4d %4d\n", i+1, p,
-			       n24[asorder[i]], npref[asorder[i]], coneas[asorder[i]].nas, rel[asorder[i]].nas_rel,
-		               nuplinks[asorder[i]], npeerings[asorder[i]]);
+	/* output statistics */
+	for (i=0; i<ngroups; i++) {
+		str[0] = 0;
+		p = str;
+		for (j=0; j<asgroup[i].nas; j++) {
+			if (p != str) *p++ = ',';
+			strcpy(p, printas(asgroup[i].asn[j]));
+			p += strlen(p);
+			if (p-str+15 >= sizeof(str)) break;
+		}
+		printf(FORMAT, str, n24_gr[i], npref_gr[i], coneas_gr[i].nas, group_rel[i], nuplinks_gr[i], npeering_gr[i]);
 	}
+	for (i=0; i<nas; i++) {
+		printf(FORMAT, printas(asnum[i]), n24[i], npref[i], coneas[i].nas, rel[i].nas_rel, nuplinks[i], npeerings[i]);
+	}
+
 	if (save_fname) {
 		debug(1, "Saving table to %s", save_fname);
 		save_table(save_fname);
 	}
+
 	debug(1, "All done");
 	return 0;
 }

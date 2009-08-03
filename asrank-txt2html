@@ -2,7 +2,13 @@
 
 # convers ascii astank output to html table
 
-@bgcolor=qw(#CCFFFF #FFFFCC);
+%bgcolor = (
+		"UA" => "#CCFFFF",
+		"RU" => "#FFFFCC"
+	   );
+$bgcolor = "#EEEEEE";
+
+$astable="as-rank.caida.org.txt";
 
 %ru = (
 		 9002 => "Retn",
@@ -44,7 +50,9 @@
 		12772 => "Enforta",
 		12714 => "NetByNet",
 		28917 => "Fiord",
-		 3058 => "RAS"
+		 3058 => "RAS",
+		35153 => "Relians",
+		20632 => "PeterStar"
       );
 %ua = (
 		21219 => "Datagroup",
@@ -54,31 +62,150 @@
 		35320 => "ETT",
 		 6849 => "UkrTelecom",
 		25229 => "Volia",
-		12883 => "Ucomline"
+		12883 => "Ucomline",
+		29632 => "NetAssist",
+		21011 => "TopNet"
       );
 
 #    1.  3356 L3               5138898 146101 18801  2431
 
+# 4       6478,7018,23143 AT&T WorldNet Services  US      6,982,030       261,523 26,466  2,212
+if (open(F, "<$astable")) {
+	while (<F>) {
+		next unless /^\d+\s+([0-9,_.]+)\s+(.*)\s+[0-9,]+\s+[0-9,]+\s+[0-9,]+\s+[0-9,]+\s*$/;
+		($as, $nameloc) = ($1, $2);
+		if ($nameloc =~ /^(.*\S)\s+([A-Z][A-Z])\s*$/ || $nameloc =~ /^(.*\S)\s*$/) {
+			($name, $loc) = ($1, $2);
+		} else {
+			($name, $loc) = ($nameloc, '');
+		}
+		foreach $a (split(/,/, $as)) {
+			$name{$a} = $name;
+			$country{$a} = $loc;
+		}
+	}
+	close(F);
+}
+
+foreach $as (keys %ru) {
+	$country{$as} = "RU";
+	$name{$as} = $ru{$as};
+}
+foreach $as (keys %ua) {
+	$country{$as} = "UA";
+	$name{$as} = $ua{$as};
+}
+
+while ($ARGV[0] =~ /^--/) {
+	if ($ARGV[0] eq "--ru") {
+		$onlyru = 1;
+	}
+	elsif ($ARGV[0] =~ /--title=(.*)/) {
+		$html = $1;
+		print "<html>\n<head><title>$html</title></head>\n<body><h2 align=center>$html</h2>\n";
+	}
+	elsif ($ARGV[0] eq "--group") {
+		$groups = 1;
+	}
+	shift(@ARGV);
+}
+
 print '<table border="1"><tr bgcolor="#555555">';
-headtd('Rank', 'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+if ($ARGV[1]) {
+	headtd('Rank', 'Diff', 'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+} else {
+	headtd('Rank',         'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+}
 print "</tr>\n";
-$i=0;
+
+if ($ARGV[1]) {
+	$oldfile = $ARGV[0];
+	shift(@ARGV);
+	open(F, "<$oldfile") || die "Cannot open $oldfile: $!\n";
+	while (<F>) {
+		next unless /^\s*(?:\d+\.\s*)?([0-9.,]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(\s+\d+\s+\d+)?\s*$/;
+		($asn, $n24, $npref, $nas, $degree) = ($1, $2, $3, $4, $5);
+		if ($asn =~ /,/) {
+			next unless $groups;
+			foreach $a (split(/,/, $asn)) {
+				$ingroup{$a}++;
+			}
+		}
+		$n24{$asn} = $n24;
+		$npref{$asn} = $npref;
+		$nas{$asn} = $nas;
+		$degree{$asn} = $degree;
+	}
+	close(F);
+	$i=0;
+	foreach (sort { $n24{$b} <=> $n24{$a} || $npref{$b} <=> $npref{$a} || $nas{$b} <=> $nas{$a} || $degree{$b} <=> $degree{$a} } keys %n24) {
+		next if $ingroup{$_};
+		if ($onlyru) {
+			next unless $country{$_} =~ /^(RU|UA)$/;
+		}
+		$oldrank{$_} = ++$i;
+	}
+	%n24 = %npref = %nas = %degree = %ingroup = ();
+}
+
 while (<>) {
-	next unless /^\s*(\d+)\.\s*(\d+) ............... \s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/;
-	($rank, $asn, $n24, $npref, $nas, $degree) = ($1, $2, $3, $4, $5, $6);
-	next unless ($ru{$asn} || $ua{$asn});
-	next if $rank>=1000;
+	next unless /^\s*([0-9.,]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(\s+\d+\s+\d+)?\s*$/;
+	($asn, $n24, $npref, $nas, $degree) = ($1, $2, $3, $4, $5);
+	if ($asn =~ /,/) {
+		next unless $groups;
+		foreach $a (split(/,/, $asn)) {
+			$ingroup{$a}++;
+		}
+	}
+	($n24{$asn}, $npref{$asn}, $nas{$asn}, $degree{$asn}) = ($n24, $npref, $nas, $degree);
+}
+$i=0;
+$rank=0;
+foreach $asn (sort { $n24{$b} <=> $n24{$a} || $npref{$b} <=> $npref{$a} || $nas{$b} <=> $nas{$a} || $degree{$b} <=> $degree{$a} } keys %n24) {
+	next if $ingroup{$asn};
+	last if ++$rank > 1000;
+	$asgr =  $asn;
+	$asn = $` if $asn =~ /,/;
+	if ($onlyru) {
+		next unless $country{$asn} =~ /^(RU|UA)$/;
+	}
 	$i++;
-	$name = $ru{$asn} ? $ru{$asn} : $ua{$asn};
+	$name = $name{$asn};
+	$name =~ s/&/&amp;/g;
 	$name =~ s/\s/&nbsp;/g;
-	$n24 = "$1&nbsp;$2" if $n24 =~ /(\d\d+)(\d\d\d)$/;
-	printf('<tr bgcolor=%s><td align=right>&nbsp;%d&nbsp;</td>', $bgcolor[$ru{$asn} ? 1 : 0], $rank);
-	printf('<td align=right>&nbsp;%s&nbsp;</td><td>&nbsp;%s&nbsp;</td>', $asn, $name);
-	printf('<td align=center>%s</td><td align=right>&nbsp;%s&nbsp;</td>', $ru{$asn} ? "RU" : "UA", $n24);
+	$name =~ s/</&lt;/g;
+	$name =~ s/>/&gt;/g;
+	($n24, $npref, $nas, $degree) = ($n24{$asgr}, $npref{$asgr}, $nas{$asgr}, $degree{$asgr});
+	$n24 = "$1&nbsp;$2" if $n24 =~ /(\d+)(\d\d\d\d\d\d)$/;
+	$n24 = "$`$1&nbsp;$2" if $n24 =~ /(\d\d)(\d\d\d)$/;
+	$npref = "$1&nbsp;$2" if $npref =~ /(\d+\d)(\d\d\d)$/;
+	$nas = "$1&nbsp;$2" if $nas =~ /(\d+\d)(\d\d\d)$/;
+	printf('<tr bgcolor=%s><td align=right>&nbsp;%d&nbsp;</td>', $bgcolor{$country{$asn}} ? $bgcolor{$country{$asn}} : $bgcolor, $rank);
+	if (%oldrank) {
+		print "<td align=right><pre>&nbsp;";
+		if (!$oldrank{$asn}) {
+			print "<font color=#00A000>New</font>";
+		} elsif ($oldrank{$asgr} == $i) {
+			print "<font color=#D0B000>0&#x25C0;</font>";			# &#x21A4;	&#x25C0; or &#x25C4;	&larr;
+		} elsif ($oldrank{$asgr} > $i) {
+			printf('<font color=#FF0000>+%d&#x25B2;</font>', $oldrank{$asgr}-$i);	# &#x21A5;	&#x25B2;	&uarr;
+		} else {
+			printf('<font color=#0000FF>-%d&#x25BC;</font>', $i-$oldrank{$asgr});	# &#x21A7;	&#x25BC;	&darr;
+		}
+		print "&nbsp;</pre></td>";
+	}
+	$pasn = $asgr;
+	if ($asgr =~ /,/) {
+		$pasn = "<a title='$asgr'>$asn&nbsp;and&nbsp;group</a>";
+	}
+	printf('<td align=right>&nbsp;%s&nbsp;</td><td>&nbsp;%s&nbsp;</td>', $pasn, $name);
+	printf('<td align=center>%s</td><td align=right>&nbsp;%s&nbsp;</td>', $country{$asn}, $n24);
 	printf('<td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td></tr>%s',
 	       $npref, $nas, $degree, "\n");
 }
-printf("</table>\n\n");
+print "</table>\n";
+print "</body>\n</html>\n" if $html;
+print "\n";
 
 sub chspace
 {
