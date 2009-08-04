@@ -12,7 +12,9 @@
 #include <arpa/inet.h>
 #include "asrank.h"
 
-#define FORMAT "%32s  %9d  %7d  %5d %4d %4d %4d\n"
+/* asn n24 npref nas degree upstreams peering updates */
+#define FORMAT "%32s  %9d  %7d  %5d %4d %4d %4d %5d\n"
+#define ALLUPDATES 1 /* calculate all updates, not only withdraw */
 
 int strict = 0;
 int debuglevel = 0;
@@ -49,9 +51,9 @@ struct rib_t {
 
 void debug(int level, char *format, ...);
 
-asarr origin, wasas, ndx;
-int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *group;
-int *n24_gr, *npref_gr, *group_rel;
+asarr origin, wasas, ndx, updates, group;
+int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref;
+int *n24_gr, *npref_gr, *group_rel, *updates_gr, *wasgroup;
 int *nuplinks, *npeerings, *nuplinks_gr, *npeering_gr;
 char *upstreams, *ups_group;
 int *upstreams_arr, *ups_group_arr;
@@ -441,9 +443,8 @@ static int collect_stats(struct rib_t *route, int preflen)
 				upstreams[ups] = 1;
 				upstreams_arr[nupstreams++] = ups;
 			}
-			if (group[ups]) {
-				ups=group[ups]-1;
-				if (ups_group[ups] == 0) {
+			if ((ups = *as(&group, asnum[ups]))) {
+				if (ups_group[--ups] == 0) {
 					ups_group[ups] = 1;
 					ups_group_arr[nups_group++] = ups;
 				}
@@ -656,6 +657,7 @@ int main(int argc, char *argv[])
 	char str[1024];
 	int progress_cnt;
 	char *save_fname;
+	asn_t asn;
 
 	save_fname = groupfile = NULL;
 	while ((ch = getopt(argc, argv, "sd:ht:n:pg:w:")) != -1) {
@@ -683,7 +685,13 @@ int main(int argc, char *argv[])
 				asgroup[ngroups].asn = calloc(sizeof(asn_t), i+1);
 				for (asgroup[ngroups].nas=0, p=strtok(str, ","); p; p=strtok(NULL, ",")) {
 					while (*p && isspace(*p)) p++;
-					asgroup[ngroups].asn[asgroup[ngroups].nas++] = readasn(p);
+					asn = readasn(p);
+					asgroup[ngroups].asn[asgroup[ngroups].nas++] = asn;
+					if (*as(&group, asn)) {
+						warning("AS%s included to more then one group", printas(asn));
+					} else {
+						*as(&group, asn) = ngroups+1;
+					}
 				}
 				ngroups++;
 			}
@@ -711,6 +719,8 @@ int main(int argc, char *argv[])
 	}
 	for (i=0; i<24; i++)
 		mask[i] = htonl(1u<<(31-i));
+	wasgroup = calloc(ngroups, sizeof(*wasgroup));
+	updates_gr = calloc(ngroups, sizeof(*updates_gr));
 
 	debug(1, "Parsing input file");
 	progress_cnt = 0;
@@ -732,14 +742,14 @@ int main(int argc, char *argv[])
 		pprefix = &rib_root;
 		for (i=0; i<entry.preflen; i++) {
 			if (*pprefix == NULL) {
-				if (entry.withdraw)
+				if (entry.withdraw == 1)
 					break;
 				else
 					*pprefix = calloc(1, sizeof(struct rib_t));
 			}
 			pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 		}
-		if (entry.withdraw) {
+		if (entry.withdraw == 1) {
 			if (!*pprefix) {
 				debug(3, "Withdraw prefix not found: %s/%d from %s", printip(entry.prefix), entry.preflen, printas(entry.origas[0]));
 				continue;
@@ -766,6 +776,13 @@ int main(int argc, char *argv[])
 				if (ap->pathes-- == 0) {
 					error("Internal error in data structures (path==0 for existing aspath), as%s", printas(ap->asn));
 					break;
+				}
+				*as(&updates, ap->asn) += 1;
+				if ((i = *as(&group, ap->asn))) {
+					if (!wasgroup[--i]) {
+						updates_gr[i]++;
+						wasgroup[i] = 1;
+					}
 				}
 				prevap = ap->prev;
 				if (ap->pathes == 0) {
@@ -796,6 +813,8 @@ int main(int argc, char *argv[])
 				}
 				ap = prevap;
 			}
+			for (i=0; i<ngroups; i++)
+				wasgroup[i] = 0;
 			pprefix[0]->npathes--;
 			bcopy(&pprefix[0]->pathes[i+1], &pprefix[0]->pathes[i], (pprefix[0]->npathes-i)*sizeof(pprefix[0]->pathes[0]));
 			bcopy(&pprefix[0]->pathes[pprefix[0]->npathes+1], &pprefix[0]->pathes[pprefix[0]->npathes], i*sizeof(peerndx_t));
@@ -881,6 +900,17 @@ int main(int argc, char *argv[])
 				}
 				*as(&wasas, prevas) = 1;
 				path[pathlen++] = prevas;
+#ifdef ALLUPDATES
+				if (entry.withdraw) {
+					*as(&updates, prevas) += 1;
+					if ((k = *as(&group, prevas))) {
+						if (!wasgroup[--k]) {
+							updates_gr[k]++;
+							wasgroup[k] = 1;
+						}
+					}
+				}
+#endif
 			}
 			curpath = &rootpath;
 			for (j=0; j<pathlen; j++) {
@@ -923,6 +953,10 @@ int main(int argc, char *argv[])
 					*as(&ndx, path[j]) = -1;
 				}
 			}
+#ifdef ALLUPDATES
+			for (j=0; j<ngroups; j++)
+				wasgroup[j] = 0;
+#endif
 		}
 		for (i=0; i<norigins; i++)
 			*as(&origin, origins[i]) = 0;
@@ -937,23 +971,9 @@ int main(int argc, char *argv[])
 	debug(1, "RIB table parsed, %d prefixes, %d pathes", fullview, aspathes);
 	/* foreach_aspath(printtree); */
 
-	/* group leaders should be indexed */
-	for (i=0; i<ngroups; i++) {
-		if (!asndx(asgroup[i].asn[0])) {
-			warning("No AS %s which listed in group %d", printas(asgroup[i].asn[0]), i);
-			*as(&ndx, asgroup[i].asn[0]) = -1;
-			nas++;
-		}
-	}
 	asnum = calloc(nas, sizeof(asn_t));
 	nas = 0;
 	foreach_aspath(fill_asndx);
-	for (i=0; i<ngroups; i++) {
-		if (asndx(asgroup[i].asn[0]) == -1) {
-			*as(&ndx, asgroup[i].asn[0]) = nas;
-			asnum[nas++] = asgroup[i].asn[0];
-		}
-	}
 
 	routes = calloc(nas, sizeof(routes[0]));
 	proutes = calloc(nas, sizeof(proutes[0]));
@@ -986,7 +1006,7 @@ int main(int argc, char *argv[])
 
 	/* next AS after tier1 candidate is candidate also */
 	add_tier1(&rootpath);
-	debug(1, "Added candidated, now %d", ntier1);
+	debug(1, "Added candidates, now %d", ntier1);
 
 	npath = calloc(nas, sizeof(npath[0]));
 	foreach_aspath(get_npath);
@@ -1051,7 +1071,6 @@ int main(int argc, char *argv[])
 	debug(1, "%d pathes to tier1, %d pathes via tier1, %d pathes avoid tier1", totier1, viatier1, horlinks);
 
 	/* calculate rating */
-	group = calloc(nas, sizeof(*group));
 	n24 = calloc(nas, sizeof(*n24));
 	npref = calloc(nas, sizeof(*npref));
 	coneas = calloc(nas, sizeof(*coneas));
@@ -1062,17 +1081,6 @@ int main(int argc, char *argv[])
 	n24_gr = calloc(ngroups, sizeof(*n24_gr));
 	npref_gr = calloc(ngroups, sizeof(*npref_gr));
 	coneas_gr = calloc(ngroups, sizeof(*coneas_gr));
-	for (i=0; i<ngroups; i++) {
-		for (j=0; j<asgroup[i].nas; j++) {
-			if (asndx(asgroup[i].asn[j]) != 0 || asnum[0] == asgroup[i].asn[j]) {
-				if (group[asndx(asgroup[i].asn[j])])
-					warning("AS %s included to more then one group", printas(asgroup[i].asn[j]));
-				else
-					group[asndx(asgroup[i].asn[j])] = i+1;
-			} else
-				warning("No AS %s which listed in group %d", printas(asgroup[i].asn[j]), i);
-		}
-	}
 	collect_stats(rib_root, 0);
 	free(upstreams);
 	free(upstreams_arr);
@@ -1139,6 +1147,7 @@ int main(int argc, char *argv[])
 		}
 
 	/* output statistics */
+	printf("==========\n");
 	for (i=0; i<ngroups; i++) {
 		str[0] = 0;
 		p = str;
@@ -1148,10 +1157,14 @@ int main(int argc, char *argv[])
 			p += strlen(p);
 			if (p-str+15 >= sizeof(str)) break;
 		}
-		printf(FORMAT, str, n24_gr[i], npref_gr[i], coneas_gr[i].nas, group_rel[i], nuplinks_gr[i], npeering_gr[i]);
+		printf(FORMAT, str, n24_gr[i], npref_gr[i], coneas_gr[i].nas,
+		       group_rel[i], nuplinks_gr[i], npeering_gr[i],
+		       updates_gr[i]);
 	}
 	for (i=0; i<nas; i++) {
-		printf(FORMAT, printas(asnum[i]), n24[i], npref[i], coneas[i].nas, rel[i].nas_rel, nuplinks[i], npeerings[i]);
+		printf(FORMAT, printas(asnum[i]), n24[i], npref[i],
+		       coneas[i].nas, rel[i].nas_rel, nuplinks[i],
+		       npeerings[i], *as(&updates, asnum[i]));
 	}
 
 	if (save_fname) {

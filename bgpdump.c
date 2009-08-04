@@ -175,7 +175,7 @@ static int read_next_update(struct dump_entry *entry)
 	if (pref_ndx < pref_num) {
 		entry->preflen = announce[pref_ndx].len;
 		entry->prefix = announce[pref_ndx++].ip;
-		entry->withdraw = 0;
+		entry->withdraw = 2;
 		return 1;
 	}
 	return 0;
