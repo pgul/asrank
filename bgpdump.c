@@ -76,6 +76,7 @@ static int process_attr(int assize, uint32_t *aspath)
 	if (get_buf(&buf, 2, &i16)) return 0;
 	if (i16 == 0) return 0;
 	attr_len = ntohs(i16);
+	aspathlen = 0;
 	while (attr_len >= 3) {
 		if (get_buf(&buf, 1, &flag)) break;
 		if (get_buf(&buf, 1, &type)) break;

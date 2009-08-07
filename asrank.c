@@ -12,8 +12,8 @@
 #include <arpa/inet.h>
 #include "asrank.h"
 
-/* asn n24 npref nas degree upstreams peering updates */
-#define FORMAT "%32s  %9d  %7d  %5d %4d %4d %4d %5d\n"
+/* asn n24/own npref/own nas degree/upstreams/peering updates/withdraw */
+#define FORMAT "%32s  %d/%d  %d/%d  %d  %d/%d/%d  %d/%d\n"
 #define ALLUPDATES 1 /* calculate all updates, not only withdraw */
 
 int debuglevel = 0;
@@ -54,9 +54,10 @@ struct rib_t {
 
 void debug(int level, char *format, ...);
 
-asarr origin, wasas, ndx, updates, group;
+asarr origin, wasas, ndx, updates, withdraw, group;
 int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref;
-int *n24_gr, *npref_gr, *group_rel, *updates_gr, *wasgroup;
+int *n24_gr, *npref_gr, *group_rel, *updates_gr, *withdraw_gr, *wasgroup;
+int *own_n24, *own_n24_gr, *own_npref, *own_npref_gr;
 int *nuplinks, *npeerings, *nuplinks_gr, *npeering_gr;
 char *upstreams, *ups_group;
 int *upstreams_arr, *ups_group_arr;
@@ -482,6 +483,12 @@ static int collect_stats(struct rib_t *route, int preflen)
 		npref_gr[ups_group_arr[i]]++;
 		ups_group[ups_group_arr[i]] = 0;
 	}
+	own_n24[asndx(route->pathes[0]->asn)] += nets;
+	own_npref[asndx(route->pathes[0]->asn)]++;
+	if ((ups = *as(&group, route->pathes[0]->asn))) {
+		own_n24_gr[--ups] += nets;
+		own_npref_gr[ups]++;
+	}
 	return (1<<(24-preflen));
 }
 
@@ -731,8 +738,10 @@ int main(int argc, char *argv[])
 		/* first loop - process params (RIB tables and updates) */
 		/* then process each updates file in each loop */
 		old_nas = nas;
-		if (ngroups)
+		if (ngroups) {
 			updates_gr = calloc(ngroups, sizeof(*updates_gr));
+			withdraw_gr = calloc(ngroups, sizeof(*withdraw_gr));
+		}
 	for (; **pinputfiles; pinputfiles[0]++) {
 		if (strcmp(**pinputfiles, "-")) {
 			if (strlen(**pinputfiles) > 4 && strcmp(**pinputfiles+strlen(**pinputfiles)-4, ".bz2") == 0) {
@@ -802,10 +811,10 @@ int main(int argc, char *argv[])
 							break;
 						}
 						if (entry.withdraw == 1) {
-							*as(&updates, ap->asn) += 1;
+							*as(&withdraw, ap->asn) += 1;
 							if ((j = *as(&group, ap->asn))) {
 								if (!wasgroup[--j]) {
-									updates_gr[j]++;
+									withdraw_gr[j]++;
 									wasgroup[j] = 1;
 								}
 							}
@@ -942,7 +951,6 @@ int main(int argc, char *argv[])
 					}
 					*as(&wasas, prevas) = 1;
 					path[pathlen++] = prevas;
-#ifdef ALLUPDATES
 					if (entry.withdraw) {
 						*as(&updates, prevas) += 1;
 						if ((k = *as(&group, prevas))) {
@@ -952,7 +960,6 @@ int main(int argc, char *argv[])
 							}
 						}
 					}
-#endif
 				}
 				curpath = &rootpath;
 				for (j=0; j<pathlen; j++) {
@@ -1001,10 +1008,8 @@ int main(int argc, char *argv[])
 							debug(5, "New ASN in update: %s", printas(path[j]));
 					}
 				}
-#ifdef ALLUPDATES
 				for (j=0; j<ngroups; j++)
 					wasgroup[j] = 0;
-#endif
 			}
 			if (peer(prefix) != peerlist)
 				bcopy(peerlist, peer(prefix), prefix->npathes*sizeof(peerndx_t));
@@ -1137,6 +1142,8 @@ int main(int argc, char *argv[])
 	n24 = calloc(nas, sizeof(*n24));
 	npref = calloc(nas, sizeof(*npref));
 	coneas = calloc(nas, sizeof(*coneas));
+	own_n24 = calloc(nas, sizeof(*own_n24));
+	own_npref = calloc(nas, sizeof(*own_npref));
 	upstreams = calloc(nas, sizeof(*upstreams));
 	upstreams_arr = calloc(nas, sizeof(*upstreams_arr));
 	if (ngroups) {
@@ -1145,6 +1152,8 @@ int main(int argc, char *argv[])
 		n24_gr = calloc(ngroups, sizeof(*n24_gr));
 		npref_gr = calloc(ngroups, sizeof(*npref_gr));
 		coneas_gr = calloc(ngroups, sizeof(*coneas_gr));
+		own_n24_gr = calloc(ngroups, sizeof(*own_n24_gr));
+		own_npref_gr = calloc(ngroups, sizeof(*own_npref_gr));
 	}
 	collect_stats(rib_root, 0);
 	free(upstreams);
@@ -1224,31 +1233,40 @@ int main(int argc, char *argv[])
 			p += strlen(p);
 			if (p-str+15 >= sizeof(str)) break;
 		}
-		printf(FORMAT, str, n24_gr[i], npref_gr[i], coneas_gr[i].nas,
-		       group_rel[i], nuplinks_gr[i], npeering_gr[i],
-		       updates_gr[i]);
+		printf(FORMAT, str, n24_gr[i], own_n24_gr[i], npref_gr[i],
+		       own_npref_gr[i], coneas_gr[i].nas, group_rel[i],
+		       nuplinks_gr[i], npeering_gr[i], updates_gr[i],
+		       withdraw_gr[i]);
 	}
 	for (i=1; i<nas; i++) {
-		printf(FORMAT, printas(asnum[i]), n24[i], npref[i],
-		       coneas[i].nas, rel[i].nas_rel, nuplinks[i],
-		       npeerings[i], *as(&updates, asnum[i]));
+		printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
+		       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel,
+		       nuplinks[i], npeerings[i], *as(&updates, asnum[i]),
+		       *as(&withdraw, asnum[i]));
 	}
 	free(n24);
 	free(npref);
 	free(coneas);
+	free(own_n24);
+	free(own_npref);
 	free(rel);
 	free(nuplinks);
 	free(npeerings);
-	for (i=1; i<nas; i++)
+	for (i=1; i<nas; i++) {
 		*as(&updates, asnum[i]) = 0;
+		*as(&withdraw, asnum[i]) = 0;
+	}
 	if (ngroups) {
 		free(n24_gr);
 		free(npref_gr);
 		free(coneas_gr);
+		free(own_n24_gr);
+		free(own_npref_gr);
 		free(group_rel);
 		free(nuplinks_gr);
 		free(npeering_gr);
 		free(updates_gr);
+		free(withdraw_gr);
 	}
 	}
 	if (ngroups)
