@@ -76,6 +76,10 @@ static int process_attr(int assize, uint32_t *aspath)
 	if (get_buf(&buf, 2, &i16)) return 0;
 	if (i16 == 0) return 0;
 	attr_len = ntohs(i16);
+	if (attr_len > buf.len-buf.pos) {
+		warning("bgp update attribute %d bytes truncated", attr_len-(buf.len-buf.pos));
+		attr_len = buf.len-buf.pos;
+	}
 	aspathlen = 0;
 	while (attr_len >= 3) {
 		if (get_buf(&buf, 1, &flag)) break;
@@ -151,6 +155,7 @@ static int read_prefix_list(struct buf_t *buf, int len, struct preflist **prefli
 	while (len > 0) {
 		if (get_buf(buf, 1, &i8)) return n;
 		i32 = 0;
+		if ((i8+7)/8 > len-1) return n;
 		if (get_buf(buf, (i8+7)/8, &i32)) return n;
 		if (*preflist_size <= n) {
 			*preflist_size = (*preflist_size+4)*2;
@@ -331,14 +336,29 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					continue;
 				}
 				i16 = ntohs(i16) - 19;
+				j = 0;
 				if (buf.len-buf.pos != i16) {
-					error("bgp message bad length (%d != %d)", buf.len-buf.pos, i16);
-					continue;
+					if (buf.len-buf.pos < i16)
+						j = i16-(buf.len-buf.pos);
+					else {
+						warning("bgp update has %d extra bytes, total size %d", (buf.len-buf.pos)-i16, buf.len);
+						buf.len = buf.pos+i16;
+					}
 				}
 				if (get_buf(&buf, 2, &i16)) break;
-				wthdr_num = read_prefix_list(&buf, ntohs(i16), &withdraw, &wthdr_max);
-				process_attr(assize,  entry->aspath[0]);
-				pref_num = read_prefix_list(&buf, buf.len-buf.pos, &announce, &pref_max);
+				i16 = ntohs(i16);
+				if (i16 > buf.len-buf.pos) {
+					warning("bgp update truncated %d bytes from withdraw (size %d)", i16-(buf.len-buf.pos), buf.len);
+					i16 = buf.len-buf.pos;
+				} else if (j) {
+						warning("bgp update truncated %d bytes to %d size", j, buf.len);
+				}
+				wthdr_num = read_prefix_list(&buf, i16, &withdraw, &wthdr_max);
+				if (buf.len-buf.pos>2) {
+					process_attr(assize,  entry->aspath[0]);
+					pref_num = read_prefix_list(&buf, buf.len-buf.pos, &announce, &pref_max);
+				} else
+					pref_num = 0;
 				wthdr_ndx = pref_ndx = 0;
 				entry->pathes = 1;
 				if (read_next_update(entry))
