@@ -1,7 +1,7 @@
 
 prefix=/usr/local
 CC=gcc
-COPT=-Wall -funsigned-char -fno-strict-aliasing -pipe -I/usr/local/include -g -DSAVE_PREFIX=1
+COPT=-Wall -funsigned-char -fno-strict-aliasing -pipe -I/usr/local/include -g
 LDOPT=-g
 
 SRCS=asrank.c bgpdump.c
