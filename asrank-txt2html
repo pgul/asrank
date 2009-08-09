@@ -112,9 +112,9 @@ while ($ARGV[0] =~ /^--/) {
 
 print '<table border="1"><tr bgcolor="#555555">';
 if ($ARGV[1]) {
-	headtd('Rank', 'Diff', 'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+	headtd('Rank', 'Diff', 'AS number', 'AS name', 'Country', '/24 / self-/24', 'Pfxs/Self-Pfxs', 'AS', 'Degree/Upstreams/Peering', 'Updates/Withdr/WithdrRate');
 } else {
-	headtd('Rank',         'AS number', 'AS name', 'Country', '/24', 'Prefixes', 'AS', 'Degree');
+	headtd('Rank',         'AS number', 'AS name', 'Country', '/24 / self-/24', 'Pfxs/Self-Pfxs', 'AS', 'Degree/Upstreams/Peering', 'Updates/Withdr/WithdrRate');
 }
 print "</tr>\n";
 
@@ -128,8 +128,9 @@ if ($ARGV[1]) {
 		if ($asn =~ /,/) {
 			next unless $groups;
 			foreach $a (split(/,/, $asn)) {
-				$ingroup{$a}++;
+				$ingroup{$a} = $asn;
 			}
+			$asn = "$`," if $asn =~ /,/;
 		}
 		$n24{$asn} = $n24;
 		$npref{$asn} = $npref;
@@ -149,15 +150,32 @@ if ($ARGV[1]) {
 }
 
 while (<>) {
-	next unless /^\s*([0-9.,]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(\s+\d+\s+\d+)?\s*$/;
-	($asn, $n24, $npref, $nas, $degree) = ($1, $2, $3, $4, $5);
+	#next unless /^\s*([0-9.,]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)(\s+\d+\s+\d+)?\s*$/;
+	if (/Uplinks for ([0-9.]+): ([0-9.,]+)\s*/) {
+		if ($ingroup{$1}) {
+			$asn = $ingroup{$1};
+			$ups = $2;
+			foreach $up (split(/,/, $ups)) {
+				$upgroup{$asn}->{$up} = 1;
+			}
+		} else {
+			$uplink{$1} = $2;
+		}
+		next;
+	}
+	next unless m@^\s*([0-9.,]+)\s+(\d+)/(\d+)\s+(\d+)/(\d+)\s+(\d+)\s+(\d+)/(\d+)/(\d+)\s+(\d+)/(\d+)\s*$@;
+	($asn, $n24, $own24, $npref, $ownpref, $nas, $degree, $ups, $peer, $updates, $withdr) = ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11);
 	if ($asn =~ /,/) {
 		next unless $groups;
 		foreach $a (split(/,/, $asn)) {
 			$ingroup{$a}++;
 		}
 	}
-	($n24{$asn}, $npref{$asn}, $nas{$asn}, $degree{$asn}) = ($n24, $npref, $nas, $degree);
+	($n24{$asn}, $own24{$asn}, $npref{$asn}, $ownpref{$asn}, $nas{$asn}, $degree{$asn}, $ups{$asn}, $peer{$asn}, $updates{$asn}, $withdr{$asn}) = ($n24, $own24, $npref, $ownpref, $nas, $degree, $ups, $peer, $updates, $withdr);
+}
+foreach $asn (keys %upgroup) {
+	$uplink{$asn} = join(',', (sort keys %{$upgroup{$asn}}));
+	delete($upgroup{$asn});
 }
 $i=0;
 $rank=0;
@@ -175,22 +193,27 @@ foreach $asn (sort { $n24{$b} <=> $n24{$a} || $npref{$b} <=> $npref{$a} || $nas{
 	$name =~ s/\s/&nbsp;/g;
 	$name =~ s/</&lt;/g;
 	$name =~ s/>/&gt;/g;
-	($n24, $npref, $nas, $degree) = ($n24{$asgr}, $npref{$asgr}, $nas{$asgr}, $degree{$asgr});
-	$n24 = "$1&nbsp;$2" if $n24 =~ /(\d+)(\d\d\d\d\d\d)$/;
-	$n24 = "$`$1&nbsp;$2" if $n24 =~ /(\d\d)(\d\d\d)$/;
-	$npref = "$1&nbsp;$2" if $npref =~ /(\d+\d)(\d\d\d)$/;
+	($n24, $own24, $npref, $ownpref, $nas, $degree, $ups, $peer, $updates, $withdr) = ($n24{$asgr}, $own24{$asgr}, $npref{$asgr}, $ownpref{$asgr}, $nas{$asgr}, $degree{$asgr}, $ups{$asgr}, $peer{$asgr}, $updates{$asgr}, $withdr{$asgr});
+	$n24 = bignumber($n24);
+	$own24 = bignumber($own24);
+	$npref = bignumber($npref);
+	$ownpref = bignumber($ownpref);
+	$nas = bignumber($nas);
+	$updates = bignumber($updates);
+	$withdr = bignumber($withdr);
 	$nas = "$1&nbsp;$2" if $nas =~ /(\d+\d)(\d\d\d)$/;
 	printf('<tr bgcolor=%s><td align=right>&nbsp;%d&nbsp;</td>', $bgcolor{$country{$asn}} ? $bgcolor{$country{$asn}} : $bgcolor, $rank);
 	if (%oldrank) {
 		print "<td align=right><pre>&nbsp;";
-		if (!$oldrank{$asn}) {
+		$oldrank = ($oldrank{$asn} || $oldrank{"$asn,"});
+		if (!$oldrank) {
 			print "<font color=#00A000>New</font>";
-		} elsif ($oldrank{$asgr} == $i) {
+		} elsif ($oldrank == $i) {
 			print "<font color=#D0B000>0&#x25C0;</font>";			# &#x21A4;	&#x25C0; or &#x25C4;	&larr;
-		} elsif ($oldrank{$asgr} > $i) {
-			printf('<font color=#FF0000>+%d&#x25B2;</font>', $oldrank{$asgr}-$i);	# &#x21A5;	&#x25B2;	&uarr;
+		} elsif ($oldrank > $i) {
+			printf('<font color=#FF0000>+%d&#x25B2;</font>', $oldrank-$i);	# &#x21A5;	&#x25B2;	&uarr;
 		} else {
-			printf('<font color=#0000FF>-%d&#x25BC;</font>', $i-$oldrank{$asgr});	# &#x21A7;	&#x25BC;	&darr;
+			printf('<font color=#0000FF>-%d&#x25BC;</font>', $i-$oldrank);	# &#x21A7;	&#x25BC;	&darr;
 		}
 		print "&nbsp;</pre></td>";
 	}
@@ -199,9 +222,17 @@ foreach $asn (sort { $n24{$b} <=> $n24{$a} || $npref{$b} <=> $npref{$a} || $nas{
 		$pasn = "<a title='$asgr'>$asn&nbsp;and&nbsp;group</a>";
 	}
 	printf('<td align=right>&nbsp;%s&nbsp;</td><td>&nbsp;%s&nbsp;</td>', $pasn, $name);
-	printf('<td align=center>%s</td><td align=right>&nbsp;%s&nbsp;</td>', $country{$asn}, $n24);
-	printf('<td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td></tr>%s',
-	       $npref, $nas, $degree, "\n");
+	printf('<td align=center>&nbsp;%s&nbsp;</td><td align=right>&nbsp;%s/%s&nbsp;</td>', $country{$asn}, $n24, $own24);
+	printf('<td align=right>&nbsp;%s/%s&nbsp;</td><td align=right>&nbsp;%d&nbsp;</td>', $npref, $ownpref, $nas);
+	printf('<td align=center>&nbsp;%d/', $degree);
+	if ($ups && $uplink{$asgr}) {
+		printf('<a title=\'%s\'>%d</a>', $uplink{$asgr}, $ups);
+	} else {
+		printf('%d', $ups);
+	}
+	printf('/%d&nbsp;</td>', $peer);
+	printf('<td align=center>&nbsp;%s/%s/%.3f&nbsp;</td></tr>%s', $updates, $withdr,
+	       $npref{$asgr} ? $withdr{$asgr}/$npref{$asgr}/5 : 0, "\n");
 }
 print "</table>\n";
 print "</body>\n</html>\n" if $html;
@@ -217,3 +248,12 @@ sub headtd
 {
 	print '<td align="center"><font color="#FFFFFF">&nbsp;' . chspace("$_") . '&nbsp;</font></td>' foreach @_;
 }
+
+sub bignumber {
+	my($num) = @_;
+
+	$num = "$1&nbsp;$2" if $num =~ /(\d+)(\d\d\d\d\d\d)$/;
+	$num = "$`$1&nbsp;$2" if $num =~ /(\d\d)(\d\d\d)$/;
+	return $num;
+}
+
