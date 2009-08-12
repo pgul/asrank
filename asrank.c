@@ -14,11 +14,10 @@
 
 /* asn n24/own npref/own nas degree/upstreams/peering updates/withdraw */
 #define FORMAT "%32s  %d/%d  %d/%d  %d  %d/%d/%d  %d/%d\n"
-#define ALLUPDATES 1 /* calculate all updates, not only withdraw */
+#define ALLUPDATES 1 /* count all updates, not only withdraw */
 
 int debuglevel = 0;
 int progress = 0;
-char *desc_fname;
 typedef uint32_t asn_t;
 typedef u_char peerndx_t;
 
@@ -52,22 +51,24 @@ struct rib_t {
 	/* peerndx_t peer[]; */
 } *rib_root;
 
-void debug(int level, char *format, ...);
-
 asarr origin, wasas, ndx, updates, withdraw, group;
-int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref;
+int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *nextas;
 int *n24_gr, *npref_gr, *group_rel, *updates_gr, *withdraw_gr, *wasgroup;
 int *own_n24, *own_n24_gr, *own_npref, *own_npref_gr;
-int *nuplinks, *npeerings, *nuplinks_gr, *npeering_gr;
+int *nuplinks, *npeerings, *nclients, *nuplinks_gr, *npeering_gr, *nclients_gr;
 char *upstreams, *ups_group;
 int *upstreams_arr, *ups_group_arr;
 asn_t *asnum;
 struct rel_t {
 	int nas_rel;
-	struct {
+	struct rel_lem_t {
 		asn_t asn;
-		int cnt;
-		int val;
+		int n24;
+		int self;
+		int prefs:24;
+		int sure:6; /* -1 - leak, 0 - no pathes (downlink or p2p), 1 - unknown, 2 - valid routes exists, 3 - upstream */
+		int pass2:1; /* upstream after excluding route-leaks */
+		int upstream:1; /* upstream after all checking, include network rate */
 	} *as_rel;
 } *rel;
 struct coneas_t {
@@ -86,15 +87,14 @@ int horlinks, totier1, viatier1;
 
 static void usage(void)
 {
-	printf("Usage: asrank [-p] [-d level] [-n fname] [-t asn] [-g fname] [-w fname] [-u fname] [file ...]\n");
+	printf("Usage: asrank [-p] [-d level] [-t asn] [-g fname] [-w fname] [-u fname[,fname...]] [file ...]\n");
 	printf("  Options:\n");
 	printf("-t asn      - hint that asn is tier1\n");
-	printf("-d level    - set debug level\n");
+	printf("-d level    - set debug level (5 and more cause huge output)\n");
 	printf("-p          - show progress bar\n");
-	printf("-n fname    - get AS names from fname (format: \"asn: desc\")\n");
 	printf("-g fname    - file defined sibling groups, one group per line, comma separated\n");
 	printf("-w fname    - write result table to fname for future processing\n");
-	printf("-u fname    - process file with updates and generate separate statistics after it\n");
+	printf("-u fname    - process file(s) with updates and generate separate statistics after it\n");
 	printf("file - input dumb RIB table\n");
 }
 
@@ -200,7 +200,7 @@ static void addconeas(struct coneas_t *coneas, int as1, asn_t as2)
 	}
 }
 
-static int mkrel(asn_t as1, asn_t as2, int val)
+static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 {
 	int left, right, new;
 	struct rel_t *p;
@@ -222,14 +222,16 @@ static int mkrel(asn_t as1, asn_t as2, int val)
 		p->as_rel = realloc(p->as_rel, p->nas_rel * sizeof(p->as_rel[0]));
 		new = left;
 		bcopy(&(p->as_rel[new]), &(p->as_rel[new+1]), (p->nas_rel-new-1) * sizeof(p->as_rel[0]));
+		memset(&p->as_rel[new], 0, sizeof(p->as_rel[0]));
 		p->as_rel[new].asn = as2;
-		p->as_rel[new].cnt = abs(val);
-		p->as_rel[new].val = val;
-	} else {
-		p->as_rel[new].cnt += abs(val);
-		p->as_rel[new].val += val;
 	}
-	return p->as_rel[new].val;
+	if (val != 0) {
+		if (val == -1)
+			p->as_rel[new].sure = -1; /* leak */
+		else if (val > p->as_rel[new].sure)
+			p->as_rel[new].sure = val;
+	}
+	return &(p->as_rel[new]);
 }
 
 static void maxroutes(struct aspath *aspath)
@@ -243,12 +245,11 @@ static void maxroutes(struct aspath *aspath)
 			if (proutes && proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
 				proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
 			if (aspath->next[i]->pathes > fullview/3) {
-				mkrel(aspath->asn, aspath->next[i]->asn, aspath->next[i]->pathes);
-				mkrel(aspath->next[i]->asn, aspath->asn, -aspath->next[i]->pathes);
+				mkrel(aspath->asn, aspath->next[i]->asn, 3);
 			} else {
 				mkrel(aspath->asn, aspath->next[i]->asn, 0);
-				mkrel(aspath->next[i]->asn, aspath->asn, 0);
 			}
+			mkrel(aspath->next[i]->asn, aspath->asn, 0);
 		}
 		maxroutes(aspath->next[i]);
 	}
@@ -351,6 +352,15 @@ static int check_valid_path_recurs(struct aspath *aspath, int level)
 	return ret;
 }
 
+static void clean_noinv(struct aspath *aspath)
+{
+	int i;
+
+	aspath->noinv = 0;
+	for (i=0; i<aspath->nnei; i++)
+		clean_noinv(aspath->next[i]);
+}
+
 static void make_rel1(asn_t *aspath, int pathlen)
 {
 	int i, first, last;
@@ -374,15 +384,224 @@ static void make_rel1(asn_t *aspath, int pathlen)
 	else if (first != 1)
 		viatier1++;
 	for (i=1; i<pathlen; i++) {
-		if (i+1<first || (i+1==first && last==first+1)) {
-			mkrel(aspath[i-1], aspath[i], 1);
-			mkrel(aspath[i], aspath[i-1], -1);
-		}
-		if (i>last || (i == last && last == first+1)) {
-			mkrel(aspath[i-1], aspath[i], -1);
+		if (i+1<first || (i+1==first && last==first+1))
 			mkrel(aspath[i], aspath[i-1], 1);
+		if (i>last || (i == last && last == first+1))
+			mkrel(aspath[i-1], aspath[i], 1);
+	}
+}
+
+static int make_rel2(struct rib_t *route, int preflen)
+{
+	static struct aspath *scan_pathes[MAXPATHES];
+	static int nextas_arr[MAXPATHES];
+	int i, j, nnext, nets, asx;
+	asn_t asn, newasn;
+
+	if (route == NULL) return 0;
+	nets = 0;
+	if (route->left)
+		nets += make_rel2(route->left, preflen+1);
+	if (route->right)
+		nets += make_rel2(route->right, preflen+1);
+	if (!route->npathes)
+		return nets;
+	if (route->npathes == 1 && rootpath.nnei > 1)
+		/* only single path for this prefix - ignore (error?) */
+		return nets;
+	nets = (1<<(24-preflen)) - nets; /* value of the current route */
+	for (i=0; i<route->npathes; i++)
+		scan_pathes[i] = route->pathes[i];
+	newasn = 0;
+	for (;;) {
+		if ((asn = newasn))
+			asx = asndx(asn);
+		nnext = 0;
+		for (i=0; i<route->npathes; i++) {
+			if (!scan_pathes[i]) continue;
+			if (!scan_pathes[i]->asn) {
+				scan_pathes[i] = NULL;
+				continue;
+			}
+			j = asndx(scan_pathes[i]->asn);
+			if (nextas[j] == 0)
+				nextas_arr[nnext++] = j;
+			nextas[j]++;
+		}
+		newasn = 0;
+		for (j=0; j<nnext; j++) {
+			if (nextas[nextas_arr[j]]*2 > route->npathes)
+				newasn = asnum[nextas_arr[j]];
+			nextas[nextas_arr[j]] = 0;
+		}
+		if (newasn == 0)
+			break;
+		if (asn)
+			mkrel(newasn, asn, 2);
+		for (i=0; i<route->npathes; i++) {
+			if (!scan_pathes[i]) continue;
+			if (scan_pathes[i]->asn != newasn)
+				scan_pathes[i] = NULL;
+			else
+				scan_pathes[i] = scan_pathes[i]->prev;
 		}
 	}
+	asn = route->pathes[0]->asn;
+	asx = asndx(asn);
+	own_npref[asx]++;
+	own_n24[asx] += nets;
+	if (!tier1[asx]) {
+		/* now check only pathes with tier1 */
+		for (i=0; i<route->npathes; i++) {
+			for (scan_pathes[i] = route->pathes[i]; scan_pathes[i]; scan_pathes[i] = scan_pathes[i]->prev) {
+				if (scan_pathes[i]->asn && tier1[asndx(scan_pathes[i]->asn)])
+					break;
+			}
+		}
+		nnext = 0;
+		for (i=0; i<route->npathes; i++) {
+			if (!scan_pathes[i]) continue;
+			if (!(newasn = route->pathes[i]->prev->asn)) continue;
+			if (nextas[j=asndx(newasn)] == 0) {
+				nextas_arr[nnext++] = j;
+				nextas[j] = 1;
+				mkrel(newasn, asn, 0)->self += nets;
+			}
+		}
+		for (i=0; i<nnext; i++)
+			nextas[nextas_arr[i]] = 0;
+	}
+	return (1<<(24-preflen));
+}
+
+static void make_rel4(struct rib_t *route)
+{
+	int i, j, noinv;
+	struct aspath *p, *p1;
+
+	if (route == NULL) return;
+	if (route->left)
+		make_rel4(route->left);
+	if (route->right)
+		make_rel4(route->right);
+	if (!route->npathes)
+		return;
+	noinv = 1;
+	for (i=0; i<route->npathes; i++) {
+		if (route->pathes[i]->noinv)
+			continue;
+		for (p=route->pathes[i]; p->prev->asn; p=p->prev) {
+			if (mkrel(p->prev->asn, p->asn, 0)->sure != 3 ||
+			    mkrel(p->asn, p->prev->asn, 0)->sure != 1)
+				continue;
+			/* are there pathes avoid p->prev->asn for this prefix? */
+			for (j=0; j<route->npathes; j++) {
+				if (i==j) continue;
+				for (p1=route->pathes[j]; p1->asn; p1=p1->prev)
+					if (p1->asn == p->prev->asn)
+						break;
+				if (!p1->asn) break;
+			}
+			if (j != route->npathes) {
+				char s[16];
+				strcpy(s, printas(p->prev->asn));
+				debug(4, "Route leak: from %s to %s", s, printas(p->asn));
+				mkrel(p->asn, p->prev->asn, -1);
+			} else
+				noinv = 0;
+		}
+		if (noinv)
+			route->pathes[i]->noinv = 1;
+	}
+}
+
+static void make_rel5(asn_t *aspath, int pathlen)
+{
+	int i, first, last;
+	int ab, ba;
+
+	first = last = 0;
+	for (i=0; i<pathlen; i++) {
+		if (tier1[asndx(aspath[i])]) {
+			if (!first)
+				first = i+1;
+			else
+				last = i+1;
+		}
+	}
+	if (!first) return;
+	if (!last) last = first;
+	for (i=1; i+1<first; i++) {
+		if ((ab = mkrel(aspath[i], aspath[i-1], 0)->sure) == -1) {
+			first = i;
+			break;
+		}
+		if (ab == 3) continue;
+		if ((ba = mkrel(aspath[i-1], aspath[i], 0)->sure) >= 2) {
+			first = i;
+			break;
+		}
+		if (ab == 1 && ba == 1) {
+			first = i;
+			break;
+		}
+	}
+	for (i=last+1; i<pathlen; i++) {
+		if ((ab = mkrel(aspath[i-1], aspath[i], 0)->sure) == -1) {
+			last = i+1;
+			break;
+		}
+		if (ab == 3) continue;
+		if ((ba = mkrel(aspath[i], aspath[i-1], 0)->sure) >= 2) {
+			last = i+1;
+			break;
+		}
+		if (ab == 1 && ba == 1) {
+			last = i+1;
+			break;
+		}
+	}
+	for (i=1; i<pathlen; i++) {
+		if (i+1<first || (i+1==first && last==first+1))
+			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
+		if (i>last || (i == last && last == first+1))
+			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
+	}
+}
+
+static void addclients(int n24, int upstream, asn_t client)
+{
+	int left, right, new;
+	struct rel_t *p;
+
+	if (client == 0) {
+		error("Internal error: client's AS number 0");
+		return;
+	}
+	p = &(rel[upstream]);
+	left = 0; right = p->nas_rel-1;
+	while (left <= right) {
+		new = (left + right) / 2;
+		if (p->as_rel[new].asn > client)
+			right = new-1;
+		else if (p->as_rel[new].asn < client)
+			left = new+1;
+		else
+			break;
+	}
+	if (left > right) {
+		/* new */
+		if (asnum[upstream] != client)
+			warning("New relations in addclients()");
+		p->nas_rel++;
+		p->as_rel = realloc(p->as_rel, p->nas_rel * sizeof(p->as_rel[0]));
+		new = left;
+		bcopy(&(p->as_rel[new]), &(p->as_rel[new+1]), (p->nas_rel-new-1) * sizeof(p->as_rel[0]));
+		memset(&(p->as_rel[new]), 0, sizeof(p->as_rel[0]));
+		p->as_rel[new].asn = client;
+	}
+	p->as_rel[new].n24 += n24;
+	p->as_rel[new].prefs += 1;
 }
 
 static int collect_stats(struct rib_t *route, int preflen)
@@ -392,9 +611,10 @@ static int collect_stats(struct rib_t *route, int preflen)
 	int nets;
 	/* following vars can be not local in this recursive function */
 	/* but recursion depth is not high (only 24), so I think this local vars are ok */
-	int i, j, aspathlen, jlast, crel, inc, ups;
+	int i, j, aspathlen, jlast, inc, ups;
 	int nupstreams, nups_group;
 	struct aspath *pt;
+	struct rel_lem_t *crel1, *crel2, *crel3, *crel4;
 	
 	nets = 0;
 	if (route == NULL) return 0;
@@ -407,6 +627,11 @@ static int collect_stats(struct rib_t *route, int preflen)
 	}
 	if (!route->npathes)
 		return nets;
+	if (route->npathes == 1 && rootpath.nnei > 1) {
+		/* assume error, ignore */
+		debug(5, "%s/%d has only one path, ignore", printip(curip), preflen);
+		return nets;
+	}
 	nets = (1<<(24-preflen)) - nets; /* value of the current route */
 	nupstreams = nups_group = 0;
 	for (i=0; i<route->npathes; i++) {
@@ -417,15 +642,22 @@ static int collect_stats(struct rib_t *route, int preflen)
 		jlast = 0;
 		inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
 		for (j=1; j<aspathlen; j++) {
-			crel = mkrel(route_aspath[j-1], route_aspath[j], 0);
-			if (crel>0) {
+			crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
+			crel2 = mkrel(route_aspath[j-1], route_aspath[j], 0);
+			if (crel1->pass2) {
 				if (inc == 1)
 					jlast = j;
 				else
 					inc = -1;
-			}
-			else if (crel<0) {
-				if (inc != -1) inc = 2;
+			} else if (crel2->pass2) {
+				if (inc != -1) inc = 3;
+#if 0 /* assume peering as unknown */
+			} else {
+				if (inc == 1)
+					inc = 2;
+				else
+					inc = -1;
+#endif
 			}
 		}
 		for (j=0; j<=jlast; j++) {
@@ -434,6 +666,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 			if (upstreams[ups] == 0) {
 				upstreams[ups] = 1;
 				upstreams_arr[nupstreams++] = ups;
+				addclients(nets, ups, (j>0) ? route_aspath[j-1] : route_aspath[0]);
 			}
 			if ((ups = *as(&group, asnum[ups]))) {
 				if (ups_group[--ups] == 0) {
@@ -458,14 +691,27 @@ static int collect_stats(struct rib_t *route, int preflen)
 			p = pathstr;
 			for (j=0; j<aspathlen; j++) {
 				if (j) {
-					crel = mkrel(route_aspath[j-1], route_aspath[j], 0);
-					if (crel>0)
-						*p++ = '>';
-					else if (crel<0)
+					crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
+					crel2 = mkrel(route_aspath[j-1], route_aspath[j], 0);
+					if (crel1->pass2 && crel2->pass2)
+						*p++ = '?';
+					else if (crel1->pass2)
 						*p++ = '<';
+					else if (crel2->pass2) {
+						*p++ = '>';
+						if (j<aspathlen-1) {
+							crel3 = mkrel(route_aspath[j+1], route_aspath[j], 0);
+							crel4 = mkrel(route_aspath[j], route_aspath[j+1], 0);
+							if (crel3->pass2 && !crel4->pass2 &&
+							    (crel1->sure == -1 || crel4->sure == -1))
+								*p++ = '!';
+						}
+					}
 					else
 						*p++ = '-';
 				}
+				if (j == aspathlen-jlast-1)
+					*p++ = '|';
 				strcpy(p, printas(route_aspath[j]));
 				p += strlen(p);
 			}
@@ -483,8 +729,6 @@ static int collect_stats(struct rib_t *route, int preflen)
 		npref_gr[ups_group_arr[i]]++;
 		ups_group[ups_group_arr[i]] = 0;
 	}
-	own_n24[asndx(route->pathes[0]->asn)] += nets;
-	own_npref[asndx(route->pathes[0]->asn)]++;
 	if ((ups = *as(&group, route->pathes[0]->asn))) {
 		own_n24_gr[--ups] += nets;
 		own_npref_gr[ups]++;
@@ -673,14 +917,13 @@ int main(int argc, char *argv[])
 	save_fname = groupfile = NULL;
 	npinputfiles = 1;
 	pinputfiles = calloc(npinputfiles+1, sizeof(*pinputfiles));
-	while ((ch = getopt(argc, argv, "sd:ht:n:pg:w:u:")) != -1) {
+	while ((ch = getopt(argc, argv, "sd:ht:pg:w:u:")) != -1) {
 		switch (ch) {
 			case 'd':	debuglevel = atoi(optarg); break;
 			case 'p':	progress = 1; break;
 			case 'h':	usage(); exit(0);
 			case 't':	tier1_arr[ntier1_hints++] = readasn(optarg); break;
 			case 'g':	groupfile = strdup(optarg); break;
-			case 'n':	desc_fname = strdup(optarg); break;
 			case 'w':	save_fname = strdup(optarg); break;
 			case 'u':	for (i=2, p=optarg; *p; p++)
 						if (*p==',') i++;
@@ -1117,23 +1360,42 @@ int main(int argc, char *argv[])
 
 	totier1 = viatier1 = horlinks = 0;
 	foreach_aspath(make_rel1);
-	free(tier1);
-	/* if relations is less then 90% assurance, then discard it */
-	nuplinks = calloc(nas, sizeof(*nuplinks));
-	npeerings = calloc(nas, sizeof(*npeerings));
-	for (i=1; i<nas; i++)
+	debug(1, "Pass 1 complete");
+	/* second path - search for route leaks */
+	nextas = calloc(nas, sizeof(*nextas));
+	own_n24 = calloc(nas, sizeof(*own_n24));
+	own_npref = calloc(nas, sizeof(*own_npref));
+	make_rel2(rib_root, 0);
+	free(nextas);
+	debug(1, "Pass 2 complete");
+	for (i=0; i<nas; i++) {
 		for (j=0; j<rel[i].nas_rel; j++) {
-			if (abs(rel[i].as_rel[j].val)*10 < rel[i].as_rel[j].cnt*9)
-				rel[i].as_rel[j].val = 0;
-			if (rel[i].as_rel[j].val > 0) {
-				char *p = strdup(printas(asnum[i]));
-				debug(4, "%s is uplink for %s", printas(rel[i].as_rel[j].asn), p);
-				free(p);
-				nuplinks[i]++;
+			struct rel_lem_t *r;
+
+			if (rel[i].as_rel[j].sure <= 0)
+				continue;
+			if ((r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0)) <= 0)
+				continue;
+			if (r->self == 0) {
+				if (rel[i].as_rel[j].self*2 > own_n24[asndx(rel[i].as_rel[j].asn)])
+					rel[i].as_rel[j].sure = 3;
+				else if (rel[i].as_rel[j].self > 0 && rel[i].as_rel[j].sure != 3)
+					rel[i].as_rel[j].sure = 2;
+			} else if (rel[i].as_rel[j].sure == 0) {
+				if (r->self*2 > own_n24[i])
+					r->sure = 3;
+				else
+					r->sure = 2;
 			}
-			else if (rel[i].as_rel[j].val == 0)
-				npeerings[i]++;
 		}
+	}
+	debug(1, "Pass 3 complete");
+	clean_noinv(&rootpath);
+	make_rel4(rib_root);
+	debug(1, "Pass 4 complete");
+	foreach_aspath(make_rel5);
+	debug(1, "Pass 5 complete");
+	free(tier1);
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
 	debug(1, "%d pathes to tier1, %d pathes via tier1, %d pathes avoid tier1", totier1, viatier1, horlinks);
@@ -1142,8 +1404,6 @@ int main(int argc, char *argv[])
 	n24 = calloc(nas, sizeof(*n24));
 	npref = calloc(nas, sizeof(*npref));
 	coneas = calloc(nas, sizeof(*coneas));
-	own_n24 = calloc(nas, sizeof(*own_n24));
-	own_npref = calloc(nas, sizeof(*own_npref));
 	upstreams = calloc(nas, sizeof(*upstreams));
 	upstreams_arr = calloc(nas, sizeof(*upstreams_arr));
 	if (ngroups) {
@@ -1164,38 +1424,72 @@ int main(int argc, char *argv[])
 	}
 	debug(1, "Rating calculated");
 
-	/* calculate degree for groups */
+	/* count nupstreams, npeerings, nclients */
+	nuplinks = calloc(nas, sizeof(*nuplinks));
+	npeerings = calloc(nas, sizeof(*npeerings));
+	nclients = calloc(nas, sizeof(*npeerings));
+	for (i=1; i<nas; i++)
+		for (j=0; j<rel[i].nas_rel; j++) {
+			struct rel_lem_t *r;
+
+			r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0);
+			if (rel[i].as_rel[j].sure > r->sure &&
+			    rel[i].as_rel[j].pass2 &&
+			    rel[i].as_rel[j].n24*64 > n24[asndx(rel[i].as_rel[j].asn)]) {
+				char *p = strdup(printas(asnum[i]));
+				debug(4, "%s is upstream for %s", p, printas(rel[i].as_rel[j].asn));
+				free(p);
+				nuplinks[i]++;
+				nclients[asndx(rel[i].as_rel[j].asn)]++;
+				rel[i].as_rel[j].upstream = 1;
+			} else if (rel[i].as_rel[j].sure <= 0 && r->sure <= 0)
+				npeerings[i]++;
+		}
+
+	/* count degree for groups */
 	if (ngroups) {
-		char *hasrel, *hasuplink, *haspeering;
-		int *asrel, *asuplink, *aspeering;
+		char *hasrel, *hasuplink, *haspeering, *hasclients;
+		int *asrel, *asuplink, *aspeering, *asclients;
 
 		group_rel = calloc(ngroups, sizeof(*group_rel));
 		nuplinks_gr = calloc(ngroups, sizeof(*nuplinks_gr));
 		npeering_gr = calloc(ngroups, sizeof(*npeering_gr));
+		nclients_gr = calloc(ngroups, sizeof(*npeering_gr));
 		hasrel = calloc(nas, sizeof(*hasrel));
 		asrel = calloc(nas, sizeof(*asrel)); /* too many, it's only list of neighbors */
 		hasuplink = calloc(nas, sizeof(*hasuplink));
 		asuplink = calloc(nas, sizeof(*asuplink)); /* too many, it's only list of neighbors */
 		haspeering = calloc(nas, sizeof(*haspeering));
 		aspeering = calloc(nas, sizeof(*aspeering)); /* too many, it's only list of neighbors */
+		hasclients = calloc(nas, sizeof(*hasclients));
+		asclients = calloc(nas, sizeof(*asclients)); /* too many, it's only list of neighbors */
 		for (i=0; i<ngroups; i++) {
-			int nasrel, relas, nasuplink, naspeering;
+			int nasrel, relas, nasuplink, naspeering, nasclients;
 
-			nasrel = nasuplink = naspeering = 0;
+			nasrel = nasuplink = naspeering = nasclients = 0;
 			for (j=0; j<asgroup[i].nas; j++) {
 				if (asndx(asgroup[i].asn[j])==0)
 					continue;
 				for (k=0; k<rel[asndx(asgroup[i].asn[j])].nas_rel; k++) {
 					relas = asndx(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn);
+					if (*as(&group, rel[asndx(asgroup[i].asn[j])].as_rel[k].asn) == j+1)
+						continue; /* do not count inter-group relations */
 					if (hasrel[relas] == 0) {
 						hasrel[relas] = 1;
 						asrel[nasrel++] = relas;
 					}
-					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].val > 0 && hasuplink[relas] == 0) {
+					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].upstream && hasuplink[relas] == 0) {
 						hasuplink[relas] = 1;
 						asuplink[nasuplink++] = relas;
 					}
-					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].val == 0 && haspeering[relas] == 0) {
+					if (mkrel(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn, asgroup[i].asn[j], 0)->upstream &&
+					    hasclients[relas] == 0) {
+						hasclients[relas] = 1;
+						asclients[nasclients++] = relas;
+					}
+					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].sure <= 0 &&
+					    mkrel(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn, asgroup[i].asn[j], 0) <= 0 &&
+					    haspeering[relas] == 0) {
 						haspeering[relas] = 1;
 						aspeering[naspeering++] = relas;
 					}
@@ -1204,9 +1498,11 @@ int main(int argc, char *argv[])
 			group_rel[i] = nasrel;
 			nuplinks_gr[i] = nasuplink;
 			npeering_gr[i] = naspeering;
+			nclients_gr[i] = naspeering;
 			for (j=0; j<nasrel; j++) hasrel[asrel[j]] = 0;
 			for (j=0; j<nasuplink; j++) hasuplink[asrel[j]] = 0;
 			for (j=0; j<naspeering; j++) haspeering[asrel[j]] = 0;
+			for (j=0; j<nasclients; j++) hasclients[asrel[j]] = 0;
 		}
 		free(hasrel);
 		free(asrel);
@@ -1214,7 +1510,23 @@ int main(int argc, char *argv[])
 		free(asuplink);
 		free(haspeering);
 		free(aspeering);
-		debug(1, "degree for groups calculated");
+		free(hasclients);
+		free(asclients);
+		debug(1, "degree for groups accounted");
+	}
+	if (debuglevel >= 6) {
+		for (i=1; i<nas; i++) {
+			static char s[16];
+
+			strcpy(s, printas(asnum[i]));
+			for (j=0; j<rel[i].nas_rel; j++) {
+				if (rel[i].as_rel[j].sure == 0) continue;
+				debug(6, "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, upstream: %d",
+				      printas(rel[i].as_rel[j].asn), s, rel[i].as_rel[j].sure,
+				      rel[i].as_rel[j].pass2 ? 1 : 0, rel[i].as_rel[j].n24, rel[i].as_rel[j].prefs,
+				      rel[i].as_rel[j].self, rel[i].as_rel[j].upstream ? 1 : 0);
+			}
+		}
 	}
 	for (i=1; i<nas; i++)
 		if (rel[i].as_rel) {
@@ -1252,6 +1564,7 @@ int main(int argc, char *argv[])
 	free(rel);
 	free(nuplinks);
 	free(npeerings);
+	free(nclients);
 	for (i=1; i<nas; i++) {
 		*as(&updates, asnum[i]) = 0;
 		*as(&withdraw, asnum[i]) = 0;
