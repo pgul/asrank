@@ -232,7 +232,7 @@ foreach $asn (sort { $n24{$b} <=> $n24{$a} || $npref{$b} <=> $npref{$a} || $nas{
 	}
 	printf('/%d&nbsp;</td>', $peer);
 	printf('<td align=center>&nbsp;%s/%s/%.3f&nbsp;</td></tr>%s', $updates, $withdr,
-	       $npref{$asgr} ? $withdr{$asgr}/$npref{$asgr}/5 : 0, "\n");
+	       $npref{$asgr} ? $withdr{$asgr}/$n24{$asgr}/5 : 0, "\n");
 }
 print "</table>\n";
 print "</body>\n</html>\n" if $html;

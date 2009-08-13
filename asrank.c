@@ -51,9 +51,10 @@ struct rib_t {
 	/* peerndx_t peer[]; */
 } *rib_root;
 
-asarr origin, wasas, ndx, updates, withdraw, group;
+asarr origin, wasas, ndx, updates, upd_n24, withdraw, withdr_n24, group;
 int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *nextas;
-int *n24_gr, *npref_gr, *group_rel, *updates_gr, *withdraw_gr, *wasgroup;
+int *n24_gr, *npref_gr, *group_rel;
+int *updates_gr, *withdraw_gr, *upd_n24_gr, *withdr_n24_gr, *wasgroup;
 int *own_n24, *own_n24_gr, *own_npref, *own_npref_gr;
 int *nuplinks, *npeerings, *nclients, *nuplinks_gr, *npeering_gr, *nclients_gr;
 char *upstreams, *ups_group;
@@ -604,6 +605,39 @@ static void addclients(int n24, int upstream, asn_t client)
 	p->as_rel[new].prefs += 1;
 }
 
+static int clientspart(asn_t *aspath, int aspathlen, int *leak)
+{
+	int i, ilast, inc;
+	struct rel_lem_t *crel1, *crel2;
+
+	ilast = 0;
+	inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
+	for (i=1; i<aspathlen; i++) {
+		if (!asndx(aspath[i]))
+			break; /* new (unknown) as number */
+		crel1 = mkrel(aspath[i], aspath[i-1], 0);
+		crel2 = mkrel(aspath[i-1], aspath[i], 0);
+		if (crel1->pass2 && !crel2->pass2) {
+			if (inc == 1)
+				ilast = i;
+			else
+				inc = -1;
+		} else if (crel2->pass2 && !crel1->pass2) {
+			if (inc != -1) inc = 3;
+#if 0 /* treat peering as unknown */
+		} else if (!crel1->pass2 && !crel2->passw) {
+			if (inc == 1)
+				inc = 2;
+			else
+				inc = -1;
+#endif
+		}
+	}
+	if (leak)
+		*leak = (inc == -1) ? 1 : 0;
+	return ilast;
+}
+
 static int collect_stats(struct rib_t *route, int preflen)
 {
 	static asn_t route_aspath[MAXPATHLEN];
@@ -611,10 +645,10 @@ static int collect_stats(struct rib_t *route, int preflen)
 	int nets;
 	/* following vars can be not local in this recursive function */
 	/* but recursion depth is not high (only 24), so I think this local vars are ok */
-	int i, j, aspathlen, jlast, inc, ups;
+	int i, j, aspathlen, jlast, ups, leak;
 	int nupstreams, nups_group;
 	struct aspath *pt;
-	struct rel_lem_t *crel1, *crel2, *crel3, *crel4;
+	struct rel_lem_t *crel1, *crel2;
 	
 	nets = 0;
 	if (route == NULL) return 0;
@@ -639,27 +673,8 @@ static int collect_stats(struct rib_t *route, int preflen)
 		for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
 			route_aspath[aspathlen++] = pt->asn;
 		/* aspath is in reverse order! */
-		jlast = 0;
-		inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
-		for (j=1; j<aspathlen; j++) {
-			crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
-			crel2 = mkrel(route_aspath[j-1], route_aspath[j], 0);
-			if (crel1->pass2) {
-				if (inc == 1)
-					jlast = j;
-				else
-					inc = -1;
-			} else if (crel2->pass2) {
-				if (inc != -1) inc = 3;
-#if 0 /* assume peering as unknown */
-			} else {
-				if (inc == 1)
-					inc = 2;
-				else
-					inc = -1;
-#endif
-			}
-		}
+		leak = 0;
+		jlast = clientspart(route_aspath, aspathlen, &leak);
 		for (j=0; j<=jlast; j++) {
 			ups = asndx(route_aspath[j]);
 			addconeas(coneas, ups, route_aspath[0]);
@@ -681,6 +696,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 			static char pathstr[MAXPATHLEN*6];
 			char *p;
 			asn_t tmp_asn;
+			int leak;
 
 			for (j=aspathlen/2-1; j>=0; j--) {
 				tmp_asn = route_aspath[j];
@@ -689,6 +705,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 			}
 			/* make aspath string */
 			p = pathstr;
+			leak = 0;
 			for (j=0; j<aspathlen; j++) {
 				if (j) {
 					crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
@@ -700,10 +717,9 @@ static int collect_stats(struct rib_t *route, int preflen)
 					else if (crel2->pass2) {
 						*p++ = '>';
 						if (j<aspathlen-1) {
-							crel3 = mkrel(route_aspath[j+1], route_aspath[j], 0);
-							crel4 = mkrel(route_aspath[j], route_aspath[j+1], 0);
-							if (crel3->pass2 && !crel4->pass2 &&
-							    (crel1->sure == -1 || crel4->sure == -1))
+							crel2 = mkrel(route_aspath[j], route_aspath[j+1], 0);
+							if (!crel2->pass2 && j < aspathlen-jlast-1
+							    /* && (crel1->sure == -1 || crel2->sure == -1) */)
 								*p++ = '!';
 						}
 					}
@@ -715,7 +731,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 				strcpy(p, printas(route_aspath[j]));
 				p += strlen(p);
 			}
-			if (inc == -1) strcpy(p, " (!)");
+			if (leak) strcpy(p, " (!)");
 			debug(5, "%s/%d: %s", printip(curip), preflen, pathstr);
 		}
 	}
@@ -871,6 +887,13 @@ static void save_table_recurs(FILE *fout, struct rib_t *route, u_char preflen)
 	}
 }
 
+static int weight(struct rib_t *pref, int preflen)
+{
+	if (pref->npathes) return (1<<(24-preflen));
+	return (pref->left  ? weight(pref->left,  preflen+1) : 0) +
+	       (pref->right ? weight(pref->right, preflen+1) : 0);
+}
+
 static void save_table(char *fname)
 {
 	FILE *fout;
@@ -913,6 +936,7 @@ int main(int argc, char *argv[])
 	char ***pinputfiles;
 	int npinputfiles;
 	peerndx_t *peerlist;
+	static asn_t aspath[MAXPATHLEN];
 
 	save_fname = groupfile = NULL;
 	npinputfiles = 1;
@@ -983,7 +1007,9 @@ int main(int argc, char *argv[])
 		old_nas = nas;
 		if (ngroups) {
 			updates_gr = calloc(ngroups, sizeof(*updates_gr));
+			upd_n24_gr = calloc(ngroups, sizeof(*upd_n24_gr));
 			withdraw_gr = calloc(ngroups, sizeof(*withdraw_gr));
+			withdr_n24_gr = calloc(ngroups, sizeof(*withdr_n24_gr));
 		}
 	for (; **pinputfiles; pinputfiles[0]++) {
 		if (strcmp(**pinputfiles, "-")) {
@@ -1008,11 +1034,11 @@ int main(int argc, char *argv[])
 
 		debug(1, "Parsing input file %s", **pinputfiles);
 		while (read_dump(f, &entry) == 0) {
-			int norigins;
+			int norigins, aspathlen, pref_n24;
 			int origins[MAXPATHES];
 			struct rib_t *prefix, **pprefix;
 			struct aspath *ap, *prevap;
-	
+
 			if (progress && ++progress_cnt % 3000 == 0) {
 				printf("#");
 				fflush(stdout);
@@ -1032,6 +1058,11 @@ int main(int argc, char *argv[])
 				}
 				pprefix = (entry.prefix & mask[i]) ? &(pprefix[0]->right) : &(pprefix[0]->left);
 			}
+			pref_n24 = (1 << (24-entry.preflen));
+			if (*pprefix) {
+				if (pprefix[0]->left)  pref_n24 -= weight(pprefix[0]->left,  entry.preflen+1);
+				if (pprefix[0]->right) pref_n24 -= weight(pprefix[0]->right, entry.preflen+1);
+			}
 			if (entry.withdraw && *pprefix) {
 				for (i=0; i<pprefix[0]->npathes; i++)
 					if (peerip(*pprefix, i) == entry.peerip[0])
@@ -1048,20 +1079,14 @@ int main(int argc, char *argv[])
 						aspathes--;
 					/* decrease pathes for each aspath objects in this path */
 					/* free unused aspath structures to delete withdrawed as relations */
+					aspathlen = 0;
 					while (ap && ap->asn) {
 						if (ap->pathes-- == 0) {
 							error("Internal error in data structures (path==0 for existing aspath), as%s", printas(ap->asn));
 							break;
 						}
-						if (entry.withdraw == 1) {
-							*as(&withdraw, ap->asn) += 1;
-							if ((j = *as(&group, ap->asn))) {
-								if (!wasgroup[--j]) {
-									withdraw_gr[j]++;
-									wasgroup[j] = 1;
-								}
-							}
-						}
+						if (entry.withdraw == 1)
+							aspath[aspathlen++] = ap->asn;
 						prevap = ap->prev;
 						if (ap->pathes == 0) {
 							debug(6, "Free aspath");
@@ -1091,9 +1116,21 @@ int main(int argc, char *argv[])
 						}
 						ap = prevap;
 					}
-					if (entry.withdraw == 1)
+					if (entry.withdraw == 1) {
+						for (j = clientspart(aspath, aspathlen, NULL); j>=0; j--) {
+							*as(&withdraw, aspath[j]) += 1;
+							*as(&withdr_n24, aspath[j]) += pref_n24;
+							if ((k = *as(&group, aspath[j]))) {
+								if (!wasgroup[--k]) {
+									withdraw_gr[k]++;
+									withdr_n24_gr[k] += pref_n24;
+									wasgroup[k] = 1;
+								}
+							}
+						}
 						for (j=0; j<ngroups; j++)
 							wasgroup[j] = 0;
+					}
 					pprefix[0]->npathes--;
 					bcopy(&pprefix[0]->pathes[i+1], &pprefix[0]->pathes[i], (pprefix[0]->npathes-i)*sizeof(pprefix[0]->pathes[0]));
 					bcopy(&pprefix[0]->pathes[pprefix[0]->npathes+1], &pprefix[0]->pathes[pprefix[0]->npathes], i*sizeof(peerndx_t));
@@ -1194,15 +1231,23 @@ int main(int argc, char *argv[])
 					}
 					*as(&wasas, prevas) = 1;
 					path[pathlen++] = prevas;
-					if (entry.withdraw) {
-						*as(&updates, prevas) += 1;
-						if ((k = *as(&group, prevas))) {
+				}
+				if (entry.withdraw) {
+					for (j=0; j<pathlen; j++)
+						aspath[j] = path[pathlen-j-1];
+					for (j=clientspart(aspath, pathlen, NULL); j>=0; j--) {
+						*as(&updates, aspath[j]) += 1;
+						*as(&upd_n24, aspath[j]) += pref_n24;
+						if ((k = *as(&group, aspath[j]))) {
 							if (!wasgroup[--k]) {
 								updates_gr[k]++;
+								upd_n24_gr[k] += pref_n24;
 								wasgroup[k] = 1;
 							}
 						}
 					}
+					for (j=0; j<ngroups; j++)
+						wasgroup[j] = 0;
 				}
 				curpath = &rootpath;
 				for (j=0; j<pathlen; j++) {
@@ -1251,8 +1296,6 @@ int main(int argc, char *argv[])
 							debug(5, "New ASN in update: %s", printas(path[j]));
 					}
 				}
-				for (j=0; j<ngroups; j++)
-					wasgroup[j] = 0;
 			}
 			if (peer(prefix) != peerlist)
 				bcopy(peerlist, peer(prefix), prefix->npathes*sizeof(peerndx_t));
@@ -1273,7 +1316,16 @@ int main(int argc, char *argv[])
 		debug(2, "Updates files processed, now %d prefixes, %d pathes, %d asn", fullview, aspathes, nas-1);
 	if (debuglevel >= 10) foreach_aspath(printtree);
 
+	if (rel) {
+		for (i=1; i<nas; i++)
+			if (rel[i].as_rel) {
+				free(rel[i].as_rel);
+				rel[i].as_rel = NULL;
+			}
+		free(rel); /* more simple then clean and realloc */
+	}
 	rel = calloc(nas, sizeof(*rel));
+
 	if (!ntier1) {
 		routes = calloc(nas, sizeof(routes[0]));
 		proutes = calloc(nas, sizeof(proutes[0]));
@@ -1528,11 +1580,6 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
-	for (i=1; i<nas; i++)
-		if (rel[i].as_rel) {
-			free(rel[i].as_rel);
-			rel[i].as_rel = NULL;
-		}
 
 	/* output statistics */
 	printf("==========\n");
@@ -1547,27 +1594,28 @@ int main(int argc, char *argv[])
 		}
 		printf(FORMAT, str, n24_gr[i], own_n24_gr[i], npref_gr[i],
 		       own_npref_gr[i], coneas_gr[i].nas, group_rel[i],
-		       nuplinks_gr[i], npeering_gr[i], updates_gr[i],
-		       withdraw_gr[i]);
+		       nuplinks_gr[i], npeering_gr[i], upd_n24_gr[i],
+		       withdr_n24_gr[i]);
 	}
 	for (i=1; i<nas; i++) {
 		printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
 		       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel,
-		       nuplinks[i], npeerings[i], *as(&updates, asnum[i]),
-		       *as(&withdraw, asnum[i]));
+		       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
+		       *as(&withdr_n24, asnum[i]));
 	}
 	free(n24);
 	free(npref);
 	free(coneas);
 	free(own_n24);
 	free(own_npref);
-	free(rel);
 	free(nuplinks);
 	free(npeerings);
 	free(nclients);
 	for (i=1; i<nas; i++) {
 		*as(&updates, asnum[i]) = 0;
+		*as(&upd_n24, asnum[i]) = 0;
 		*as(&withdraw, asnum[i]) = 0;
+		*as(&withdr_n24, asnum[i]) = 0;
 	}
 	if (ngroups) {
 		free(n24_gr);
@@ -1579,11 +1627,15 @@ int main(int argc, char *argv[])
 		free(nuplinks_gr);
 		free(npeering_gr);
 		free(updates_gr);
+		free(upd_n24_gr);
 		free(withdraw_gr);
+		free(withdr_n24_gr);
 	}
 	}
 	if (ngroups)
 		free(wasgroup);
+	if (rel)
+		free(rel);
 
 	if (save_fname) {
 		debug(1, "Saving table to %s", save_fname);

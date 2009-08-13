@@ -1,12 +1,13 @@
 - 6th pass - set relations by pathes without tier1. if determinated - count.
-- считать кол-во апдейтов только для клиентских конусов, а для для всего as-path;
+- manual IX AS set, no upstreams (except own prefixes): 15645, 6695, 1200, ...
+- why no '<>' relations (both A->B pass2 and B->A pass2)?
 - не считать апстримами и пирами членов собственной группы, не включать внутренние связи в degree;
+- определять s2s, помечать как '='
 - нет тултипов для апстримов у групп;
-- считать кол-во updates24 (апдейт на одну /22 как 4 updates24, если нет more specific);
+
+- обработка данных за историю, результаты в mysql, cgi, graphs, requests about route-leaks
 - считать устойчивость (надёжность, дисперсия показателей по времени);
 - считать связность каким-то образом;
 - конфигурируемые параметры определения взаимосвязей между as;
-- обработка данных за историю, результаты в mysql, cgi, graphs, requests about route-leaks
 - исключить совпадающие as-path от разных пиров (с разными orig-as)
 - средняя длина fullview для каждого ISP (?)
-- manual IX AS set, no upstreams (except own prefixes): 15645, 6695, 1200, ...
