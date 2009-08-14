@@ -589,19 +589,28 @@ static void make_rel6(asn_t *aspath, int pathlen)
 	inc = 1;
 	ifirst = 0;
 	ilast = pathlen-1;
+	/*  if A>B-C>D then B>C, only one unknown hop between two known
+	 *  and only for completely valid pathes */
 	for (i=1; i<pathlen; i++) {
 		crel1= mkrel(aspath[i-1], aspath[i], 0);
 		crel2= mkrel(aspath[i], aspath[i-1], 0);
 		if (!crel1->pass2 && crel2->pass2) {
-			if (inc == 1) ifirst = i;
+			if (inc == 1 || inc == 2) {
+				ifirst = i;
+				inc = 1;
+			}
 			ilast = pathlen-1;
 		} else if (crel1->pass2 && !crel2->pass2) {
-			inc = 2;
+			inc = 3;
 			ilast = i-1;
 		} else if (crel1->pass2 && crel2->pass2) {
-			inc = 2;
+			inc = 3;
 			ilast = pathlen-1;
-		} /* else change nothing */
+		} else {
+			if (inc == 4)
+				ilast = pathlen -1;
+			inc++;
+		}
 	}
 	for (i=1; i<pathlen; i++) {
 		if (i<=ifirst) {
@@ -652,11 +661,11 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 	struct rel_lem_t *crel1, *crel2;
 
 	ilast = 0;
-	inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
-	if (!asndx(aspath[0]) || asndx(aspath[0]) >= old_nas /* || rel[asndx(aspath[0])].nas_rel == 0 */)
+	inc = 1; /* 1 - going up, 3 - going down */
+	if (!asndx(aspath[0]) || asndx(aspath[0]) >= old_nas)
 		return 0;
 	for (i=1; i<aspathlen; i++) {
-		if (!asndx(aspath[i]) || asndx(aspath[i]) >= old_nas /* || rel[asndx(aspath[i])].nas_rel == 0 */)
+		if (!asndx(aspath[i]) || asndx(aspath[i]) >= old_nas)
 			break; /* new (unknown) as number */
 		crel1 = mkrel(aspath[i], aspath[i-1], 0);
 		crel2 = mkrel(aspath[i-1], aspath[i], 0);
@@ -664,9 +673,10 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 			if (inc == 1)
 				ilast = i;
 			else
-				inc = -1;
+				break;
 		} else if (crel2->pass2 && !crel1->pass2) {
-			if (inc != -1) inc = 3;
+			inc = 3;
+			if (!leak) return ilast;
 #if 0 /* treat peering as unknown */
 		} else if (!crel1->pass2 && !crel2->passw) {
 			if (inc == 1)
@@ -677,7 +687,7 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 		}
 	}
 	if (leak)
-		*leak = (inc == -1) ? 1 : 0;
+		*leak = (i == aspathlen) ? 0 : 1;
 	return ilast;
 }
 
@@ -739,7 +749,6 @@ static int collect_stats(struct rib_t *route, int preflen)
 			static char pathstr[MAXPATHLEN*6];
 			char *p;
 			asn_t tmp_asn;
-			int leak;
 
 			for (j=aspathlen/2-1; j>=0; j--) {
 				tmp_asn = route_aspath[j];
@@ -748,7 +757,6 @@ static int collect_stats(struct rib_t *route, int preflen)
 			}
 			/* make aspath string */
 			p = pathstr;
-			leak = 0;
 			for (j=0; j<aspathlen; j++) {
 				if (j) {
 					crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
