@@ -1047,7 +1047,6 @@ int main(int argc, char *argv[])
 	for (; *pinputfiles; pinputfiles++) {
 		/* first loop - process params (RIB tables and updates) */
 		/* then process each updates file in each loop */
-		old_nas = nas;
 		if (ngroups) {
 			updates_gr = calloc(ngroups, sizeof(*updates_gr));
 			upd_n24_gr = calloc(ngroups, sizeof(*upd_n24_gr));
@@ -1366,6 +1365,7 @@ int main(int argc, char *argv[])
 		free(rel); /* more simple then realloc and clean */
 	}
 	rel = calloc(nas, sizeof(*rel));
+	old_nas = nas;
 
 	if (!ntier1) {
 		routes = calloc(nas, sizeof(routes[0]));
