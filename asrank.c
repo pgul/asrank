@@ -67,7 +67,7 @@ struct rel_t {
 		int n24;
 		int self;
 		int prefs:24;
-		int sure:6; /* -1 - leak, 0 - no pathes (downlink or p2p), 1 - unknown, 2 - valid routes exists, 3 - upstream */
+		int sure:6; /* -1 - leak, 0 - no pathes (downlink or p2p), 2 - route found, 3 - valid routes exists, 4 - upstream */
 		int pass2:1; /* upstream after excluding route-leaks */
 		int upstream:1; /* upstream after all checking, include network rate */
 	} *as_rel;
@@ -76,7 +76,7 @@ struct coneas_t {
 	int nas;
 	int *asn;
 } *coneas, *coneas_gr;
-int nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes;
+int nas, old_nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
 uint32_t mask[24];
 int ngroups;
@@ -206,6 +206,10 @@ static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 	int left, right, new;
 	struct rel_t *p;
 
+	if (asndx(as1) == 0) {
+		error("Internal error: mkrel for unknown AS %s", printas(as1));
+		return NULL;
+	}
 	p = &(rel[asndx(as1)]);
 	left = 0; right = p->nas_rel-1;
 	while (left <= right) {
@@ -221,9 +225,13 @@ static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 		/* new */
 		p->nas_rel++;
 		p->as_rel = realloc(p->as_rel, p->nas_rel * sizeof(p->as_rel[0]));
+		if (p->as_rel == NULL) {
+			error("Internal error: cannot realloc as_rel, needed %d bytes", p->nas_rel * sizeof(p->as_rel[0]));
+			return NULL;
+		}
 		new = left;
 		bcopy(&(p->as_rel[new]), &(p->as_rel[new+1]), (p->nas_rel-new-1) * sizeof(p->as_rel[0]));
-		memset(&p->as_rel[new], 0, sizeof(p->as_rel[0]));
+		memset(&(p->as_rel[new]), 0, sizeof(p->as_rel[0]));
 		p->as_rel[new].asn = as2;
 	}
 	if (val != 0) {
@@ -246,7 +254,7 @@ static void maxroutes(struct aspath *aspath)
 			if (proutes && proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
 				proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
 			if (aspath->next[i]->pathes > fullview/3) {
-				mkrel(aspath->asn, aspath->next[i]->asn, 3);
+				mkrel(aspath->asn, aspath->next[i]->asn, 4);
 			} else {
 				mkrel(aspath->asn, aspath->next[i]->asn, 0);
 			}
@@ -300,6 +308,7 @@ static void foreach_aspath(void (*func)(asn_t *aspath, int pathlen))
 static int check_valid_path(asn_t *aspath, int pathlen)
 {
 	int i, seqlen, ret;
+	char s[16];
 
 	seqlen = ret = 0;
 	for (i=0; i<pathlen; i++) {
@@ -312,9 +321,8 @@ static int check_valid_path(asn_t *aspath, int pathlen)
 				inv_pathes++;
 				ret = 1;
 				if (debuglevel >= 7) {
-					char *p = strdup(printaspath(aspath+i-seqlen, seqlen));
-					debug(7, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), p);
-					free(p);
+					strcpy(s, printaspath(aspath+i-seqlen, seqlen));
+					debug(7, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), s);
 				}
 			}
 			seqlen = 0;
@@ -326,9 +334,8 @@ static int check_valid_path(asn_t *aspath, int pathlen)
 		inv_pathes++;
 		ret = 1;
 		if (debuglevel >= 7) {
-			char *p = strdup(printaspath(aspath+i-seqlen, seqlen));
-			debug(7, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), p);
-			free(p);
+			strcpy(s, printaspath(aspath+i-seqlen, seqlen));
+			debug(7, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), s);
 		}
 	}
 	return ret;
@@ -386,9 +393,9 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		viatier1++;
 	for (i=1; i<pathlen; i++) {
 		if (i+1<first || (i+1==first && last==first+1))
-			mkrel(aspath[i], aspath[i-1], 1);
+			mkrel(aspath[i], aspath[i-1], 2);
 		if (i>last || (i == last && last == first+1))
-			mkrel(aspath[i-1], aspath[i], 1);
+			mkrel(aspath[i-1], aspath[i], 2);
 	}
 }
 
@@ -438,7 +445,7 @@ static int make_rel2(struct rib_t *route, int preflen)
 		if (newasn == 0)
 			break;
 		if (asn)
-			mkrel(newasn, asn, 2);
+			mkrel(newasn, asn, 3);
 		for (i=0; i<route->npathes; i++) {
 			if (!scan_pathes[i]) continue;
 			if (scan_pathes[i]->asn != newasn)
@@ -492,8 +499,8 @@ static void make_rel4(struct rib_t *route)
 		if (route->pathes[i]->noinv)
 			continue;
 		for (p=route->pathes[i]; p->prev->asn; p=p->prev) {
-			if (mkrel(p->prev->asn, p->asn, 0)->sure != 3 ||
-			    mkrel(p->asn, p->prev->asn, 0)->sure != 1)
+			if (mkrel(p->prev->asn, p->asn, 0)->sure != 4 ||
+			    mkrel(p->asn, p->prev->asn, 0)->sure != 2)
 				continue;
 			/* are there pathes avoid p->prev->asn for this prefix? */
 			for (j=0; j<route->npathes; j++) {
@@ -537,12 +544,12 @@ static void make_rel5(asn_t *aspath, int pathlen)
 			first = i;
 			break;
 		}
-		if (ab == 3) continue;
-		if ((ba = mkrel(aspath[i-1], aspath[i], 0)->sure) >= 2) {
+		if (ab == 4) continue;
+		if ((ba = mkrel(aspath[i-1], aspath[i], 0)->sure) >= 3) {
 			first = i;
 			break;
 		}
-		if (ab == 1 && ba == 1) {
+		if (ab == 2 && ba == 2) {
 			first = i;
 			break;
 		}
@@ -552,12 +559,12 @@ static void make_rel5(asn_t *aspath, int pathlen)
 			last = i+1;
 			break;
 		}
-		if (ab == 3) continue;
-		if ((ba = mkrel(aspath[i], aspath[i-1], 0)->sure) >= 2) {
+		if (ab == 4) continue;
+		if ((ba = mkrel(aspath[i], aspath[i-1], 0)->sure) >= 3) {
 			last = i+1;
 			break;
 		}
-		if (ab == 1 && ba == 1) {
+		if (ab == 2 && ba == 2) {
 			last = i+1;
 			break;
 		}
@@ -567,6 +574,40 @@ static void make_rel5(asn_t *aspath, int pathlen)
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
 		if (i>last || (i == last && last == first+1))
 			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
+	}
+}
+
+static void make_rel6(asn_t *aspath, int pathlen)
+{
+	int i, ifirst, ilast, inc;
+	struct rel_lem_t *crel1, *crel2;
+
+	/* process only pathes without tier1 */
+	for (i=0; i<pathlen; i++)
+		if (tier1[asndx(aspath[i])])
+			return;
+	inc = 1;
+	ifirst = 0;
+	ilast = pathlen-1;
+	for (i=1; i<pathlen; i++) {
+		crel1= mkrel(aspath[i-1], aspath[i], 0);
+		crel2= mkrel(aspath[i], aspath[i-1], 0);
+		if (!crel1->pass2 && crel2->pass2) {
+			if (inc == 1) ifirst = i;
+			ilast = pathlen-1;
+		} else if (crel1->pass2 && !crel2->pass2) {
+			inc = 2;
+			ilast = i-1;
+		} else if (crel1->pass2 && crel2->pass2) {
+			inc = 2;
+			ilast = pathlen-1;
+		} /* else change nothing */
+	}
+	for (i=1; i<pathlen; i++) {
+		if (i<=ifirst) {
+			mkrel(aspath[i], aspath[i-1], 1);
+		} else if (i>ilast)
+			mkrel(aspath[i-1], aspath[i], 1);
 	}
 }
 
@@ -612,8 +653,10 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 
 	ilast = 0;
 	inc = 1; /* 1 - going up, 2 - going down, -1 - invalid path (up after down) */
+	if (!asndx(aspath[0]) || asndx(aspath[0]) >= old_nas /* || rel[asndx(aspath[0])].nas_rel == 0 */)
+		return 0;
 	for (i=1; i<aspathlen; i++) {
-		if (!asndx(aspath[i]))
+		if (!asndx(aspath[i]) || asndx(aspath[i]) >= old_nas /* || rel[asndx(aspath[i])].nas_rel == 0 */)
 			break; /* new (unknown) as number */
 		crel1 = mkrel(aspath[i], aspath[i-1], 0);
 		crel2 = mkrel(aspath[i-1], aspath[i], 0);
@@ -928,7 +971,7 @@ int main(int argc, char *argv[])
 	struct dump_entry entry;
 	char *groupfile;
 	char str[1024];
-	int progress_cnt, old_nas, num_size;
+	int progress_cnt, num_size;
 	char *save_fname;
 	asn_t asn;
 	char *arrstdin[] = {"-", NULL};
@@ -1317,12 +1360,10 @@ int main(int argc, char *argv[])
 	if (debuglevel >= 10) foreach_aspath(printtree);
 
 	if (rel) {
-		for (i=1; i<nas; i++)
-			if (rel[i].as_rel) {
+		for (i=1; i<old_nas; i++)
+			if (rel[i].nas_rel)
 				free(rel[i].as_rel);
-				rel[i].as_rel = NULL;
-			}
-		free(rel); /* more simple then clean and realloc */
+		free(rel); /* more simple then realloc and clean */
 	}
 	rel = calloc(nas, sizeof(*rel));
 
@@ -1430,14 +1471,14 @@ int main(int argc, char *argv[])
 				continue;
 			if (r->self == 0) {
 				if (rel[i].as_rel[j].self*2 > own_n24[asndx(rel[i].as_rel[j].asn)])
+					rel[i].as_rel[j].sure = 4;
+				else if (rel[i].as_rel[j].self > 0 && rel[i].as_rel[j].sure != 4)
 					rel[i].as_rel[j].sure = 3;
-				else if (rel[i].as_rel[j].self > 0 && rel[i].as_rel[j].sure != 3)
-					rel[i].as_rel[j].sure = 2;
 			} else if (rel[i].as_rel[j].sure == 0) {
 				if (r->self*2 > own_n24[i])
-					r->sure = 3;
+					r->sure = 4;
 				else
-					r->sure = 2;
+					r->sure = 3;
 			}
 		}
 	}
@@ -1447,6 +1488,23 @@ int main(int argc, char *argv[])
 	debug(1, "Pass 4 complete");
 	foreach_aspath(make_rel5);
 	debug(1, "Pass 5 complete");
+	foreach_aspath(make_rel6);
+	for (i=0; i<nas; i++) {
+		for (j=0; j<rel[i].nas_rel; j++) {
+			struct rel_lem_t *r;
+
+			if (rel[i].as_rel[j].sure != 1)
+				continue;
+			if ((r=mkrel(rel[i].as_rel[j].asn, asnum[i], 0))->sure == 1)
+				continue;
+			if (r->pass2)
+				continue;
+			/* relations determined - set pass2 */
+			rel[i].as_rel[j].pass2 = 1;
+		}
+	}
+	/* repeat pass 6? */
+	debug(1, "Pass 6 complete");
 	free(tier1);
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
@@ -1634,9 +1692,12 @@ int main(int argc, char *argv[])
 	}
 	if (ngroups)
 		free(wasgroup);
-	if (rel)
+	if (rel) {
+		for (i=1; i<nas; i++)
+			if (rel[i].nas_rel)
+				free(rel[i].as_rel);
 		free(rel);
-
+	}
 	if (save_fname) {
 		debug(1, "Saving table to %s", save_fname);
 		save_table(save_fname);
