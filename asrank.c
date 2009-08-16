@@ -1734,6 +1734,14 @@ int main(int argc, char *argv[])
 		       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
 		       *as(&withdr_n24, asnum[i]));
 	}
+
+	for (i=1; i<nas; i++) {
+		*as(&updates, asnum[i]) = 0;
+		*as(&upd_n24, asnum[i]) = 0;
+		*as(&withdraw, asnum[i]) = 0;
+		*as(&withdr_n24, asnum[i]) = 0;
+		if (coneas[i].asn) free(coneas[i].asn);
+	}
 	free(n24);
 	free(npref);
 	free(coneas);
@@ -1742,12 +1750,6 @@ int main(int argc, char *argv[])
 	free(nuplinks);
 	free(npeerings);
 	free(nclients);
-	for (i=1; i<nas; i++) {
-		*as(&updates, asnum[i]) = 0;
-		*as(&upd_n24, asnum[i]) = 0;
-		*as(&withdraw, asnum[i]) = 0;
-		*as(&withdr_n24, asnum[i]) = 0;
-	}
 	if (ngroups) {
 		free(n24_gr);
 		free(npref_gr);
