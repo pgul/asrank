@@ -67,9 +67,10 @@ struct rel_t {
 		int n24;
 		int self;
 		int prefs:24;
-		int sure:6; /* -1 - leak, 0 - no pathes (downlink or p2p), 2 - route found, 3 - valid routes exists, 4 - upstream */
+		int sure:5; /* -1 - leak, 0 - no pathes (downlink or p2p), 2 - route found, 3 - valid routes exists, 4 - upstream */
 		int pass2:1; /* upstream after excluding route-leaks */
 		int upstream:1; /* upstream after all checking, include network rate */
+		int sibling:1;  /* members of one group */
 	} *as_rel;
 } *rel;
 struct coneas_t {
@@ -79,19 +80,20 @@ struct coneas_t {
 int nas, old_nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
 uint32_t mask[24];
-int ngroups;
-struct {
+int ngroups, nix;
+struct group_t {
 	int nas;
 	asn_t *asn;
-} *asgroup;
+} *asgroup, *asix;
 int horlinks, totier1, viatier1;
 
 static void usage(void)
 {
-	printf("Usage: asrank [-p] [-d level] [-t asn] [-x asn] [-g fname] [-w fname] [-u fname[,fname...]] [file ...]\n");
+	printf("Usage: asrank [-p] [-d level] [-t asn] [-x <asn|@fname>] [-g fname] [-w fname] [-u fname[,fname...]] [file ...]\n");
 	printf("  Options:\n");
 	printf("-t asn      - hint that asn is tier1\n");
 	printf("-x asn      - asn is internet exchange point\n");
+	printf("-x @fname   - file with IX list (one IX per line, comma separated for sibling)\n");
 	printf("-d level    - set debug level (5 and more cause huge output)\n");
 	printf("-p          - show progress bar\n");
 	printf("-g fname    - file defined sibling groups, one group per line, comma separated\n");
@@ -375,16 +377,16 @@ static void clean_noinv(struct aspath *aspath)
 
 static void make_rel1(asn_t *aspath, int pathlen)
 {
-	int i, first, last;
+	int i, t1, first, last;
 
-	first = last = 0;
+	first = last = t1 = 0;
 	for (i=0; i<pathlen; i++) {
 		if (tier1[asndx(aspath[i])]) {
 			if (!first)
 				first = i+1;
 			else
 				last = i+1;
-			viatier1 = 1;
+			t1 = 1;
 		}
 		if ((i != 0 && i != pathlen-1 && *as(&ix, aspath[i]))) {
 			if (!first)
@@ -395,11 +397,15 @@ static void make_rel1(asn_t *aspath, int pathlen)
 			mkrel(aspath[i], aspath[i-1], 4)->pass2 = 1;
 			mkrel(aspath[i], aspath[i+1], 4)->pass2 = 1;
 		}
+		if (i>0 &&
+		    ((*as(&group, aspath[i-1]) && *as(&group, aspath[i-1]) == *as(&group, aspath[i])) ||
+		    (*as(&ix, aspath[i-1]) && *as(&ix, aspath[i-1]) == *as(&ix, aspath[i])))) {
+			mkrel(aspath[i-1], aspath[i], 0)->sibling = 1;
+			mkrel(aspath[i], aspath[i-1], 0)->sibling = 1;
+		}
 	}
-	if (!viatier1) {
-		horlinks++;
-		return;
-	}
+	if (!t1) horlinks++;
+	if (!first) return;
 	if (!last) last = first;
 	if (tier1[asndx(aspath[pathlen-1])])
 		totier1++;
@@ -699,6 +705,8 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 		} else if (crel2->pass2 && !crel1->pass2) {
 			inc = 3;
 			if (!leak) return ilast;
+		} else if (crel1->sibling && inc == 1) {
+			ilast = i;
 #if 0 /* treat peering as unknown */
 		} else if (!crel1->pass2 && !crel2->passw) {
 			if (inc == 1)
@@ -783,12 +791,19 @@ static int collect_stats(struct rib_t *route, int preflen)
 				if (j) {
 					crel1 = mkrel(route_aspath[j], route_aspath[j-1], 0);
 					crel2 = mkrel(route_aspath[j-1], route_aspath[j], 0);
-					if (crel1->pass2 && crel2->pass2)
-						*p++ = '?';
-					else if (crel1->pass2)
+					if (crel1->pass2 && crel2->pass2) {
+						if (crel1->sibling)
+							*p++ = '=';
+						else
+							*p++ = '<', *p++='>';
+					} else if (crel1->pass2) {
 						*p++ = '<';
-					else if (crel2->pass2) {
+						if (crel1->sibling)
+							*p++ = '=';
+					} else if (crel2->pass2) {
 						*p++ = '>';
+						if (crel2->sibling)
+							*p++ = '=';
 						if (j<aspathlen-1) {
 							crel2 = mkrel(route_aspath[j], route_aspath[j+1], 0);
 							if (!crel2->pass2 && j < aspathlen-jlast-1
@@ -797,10 +812,10 @@ static int collect_stats(struct rib_t *route, int preflen)
 						}
 					}
 					else
-						*p++ = '-';
+						*p++ = crel1->sibling ? '=' : '-';
 				}
 				if (j == aspathlen-jlast-1)
-					*p++ = '|';
+					*p++ = '{';
 				strncpy(p, printas(route_aspath[j]), sizeof(pathstr) - (p-pathstr) - 1);
 				p += strlen(p);
 				if ((p-pathstr) > sizeof(pathstr)-3) break;
@@ -994,25 +1009,56 @@ static void save_table(char *fname)
 	fclose(fout);
 }
 
+void readaslist(char *fname, asarr *group, struct group_t **asgroup, int *ngroups)
+{
+	FILE *f;
+	char str[1024], *p;
+	int i;
+	asn_t asn;
+
+	f = fopen(fname, "r");
+	if (f == NULL) {
+		error("Cannot open %s: %s", fname, strerror(errno));
+		return;
+	}
+	while (fgets(str, sizeof(str), f)) {
+		if (!isdigit(str[0])) continue;
+		*asgroup = realloc(*asgroup, (*ngroups+1) * sizeof(**asgroup));
+		for (i=0, p=str; *p; p++)
+			if (*p == ',') i++;
+		asgroup[0][*ngroups].asn = calloc(sizeof(asn_t), i+1);
+		for (asgroup[0][*ngroups].nas=0, p=strtok(str, ","); p; p=strtok(NULL, ",")) {
+			while (*p && isspace(*p)) p++;
+			asn = readasn(p);
+			asgroup[0][*ngroups].asn[asgroup[0][*ngroups].nas++] = asn;
+			if (*as(group, asn))
+				warning("AS%s included to more then one group", printas(asn));
+			else
+				*as(group, asn) = *ngroups+1;
+		}
+		ngroups[0]++;
+	}
+	fclose(f);
+}
+
 int main(int argc, char *argv[])
 {
 	int ch, i, j, k;
 	char *p;
 	FILE *f;
 	struct dump_entry entry;
-	char *groupfile;
-	char str[1024];
+	char *groupfile, *ixfile;
 	int progress_cnt, num_size;
 	char *save_fname;
-	asn_t asn;
 	char *arrstdin[] = {"-", NULL};
 	char **inputfiles;
 	char ***pinputfiles;
 	int npinputfiles;
 	peerndx_t *peerlist;
 	static asn_t aspath[MAXPATHLEN];
+	char str[1024];
 
-	save_fname = groupfile = NULL;
+	save_fname = groupfile = ixfile = NULL;
 	npinputfiles = 1;
 	pinputfiles = calloc(npinputfiles+1, sizeof(*pinputfiles));
 	while ((ch = getopt(argc, argv, "sd:ht:pg:w:u:x:")) != -1) {
@@ -1021,7 +1067,20 @@ int main(int argc, char *argv[])
 			case 'p':	progress = 1; break;
 			case 'h':	usage(); exit(0);
 			case 't':	tier1_arr[ntier1_hints++] = readasn(optarg); break;
-			case 'x':	*as(&ix, readasn(optarg)) = 1; break;
+			case 'x':	if (*optarg != '@') {
+						for (i=1, p=optarg+1; *p; p++)
+							if (*p==',') i++;
+						asix=realloc(asix, (nix+1) * sizeof(*asix));
+						asix[nix].nas = i;
+						asix[nix].asn = calloc(i, sizeof(asix->asn[0]));
+						for (i=0, p=strtok(strdup(optarg), ","); i<asix[nix].nas; i++, p=strtok(NULL, ",")) {
+							asix[nix].asn[i] = readasn(p);
+							*as(&ix, asix[nix].asn[i]) = nix+1;
+						}
+						nix++;
+					} else
+						ixfile = strdup(optarg+1);
+					break;
 			case 'g':	groupfile = strdup(optarg); break;
 			case 'w':	save_fname = strdup(optarg); break;
 			case 'u':	for (i=2, p=optarg; *p; p++)
@@ -1035,31 +1094,12 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (groupfile) {
-		f = fopen(groupfile, "r");
-		if (f == NULL) {
-			error("Cannot open %s: %s", groupfile, strerror(errno));
-		} else {
-			while (fgets(str, sizeof(str), f)) {
-				if (!isdigit(str[0])) continue;
-				asgroup = realloc(asgroup, (ngroups+1) * sizeof(*asgroup));
-				for (i=0, p=str; *p; p++)
-					if (*p == ',') i++;
-				asgroup[ngroups].asn = calloc(sizeof(asn_t), i+1);
-				for (asgroup[ngroups].nas=0, p=strtok(str, ","); p; p=strtok(NULL, ",")) {
-					while (*p && isspace(*p)) p++;
-					asn = readasn(p);
-					asgroup[ngroups].asn[asgroup[ngroups].nas++] = asn;
-					if (*as(&group, asn)) {
-						warning("AS%s included to more then one group", printas(asn));
-					} else {
-						*as(&group, asn) = ngroups+1;
-					}
-				}
-				ngroups++;
-			}
-			fclose(f);
-		}
+		readaslist(groupfile, &group, &asgroup, &ngroups);
 		debug(3, "groups file %s read, %d groups found", groupfile, ngroups);
+	}
+	if (ixfile) {
+		readaslist(ixfile, &ix, &asix, &nix);
+		debug(3, "ix list file %s read, %d ix found", ixfile, nix);
 	}
 	if (argv[optind])
 		inputfiles = argv + optind;
