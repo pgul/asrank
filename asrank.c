@@ -1056,7 +1056,7 @@ int main(int argc, char *argv[])
 	int npinputfiles;
 	peerndx_t *peerlist;
 	static asn_t aspath[MAXPATHLEN];
-	char str[1024];
+	char str[1024], cmd[1024];
 
 	save_fname = groupfile = ixfile = NULL;
 	npinputfiles = 1;
@@ -1126,9 +1126,9 @@ int main(int argc, char *argv[])
 			withdr_n24_gr = calloc(ngroups, sizeof(*withdr_n24_gr));
 		}
 	for (; **pinputfiles; pinputfiles[0]++) {
+		cmd[0] = '\0';
 		if (strcmp(**pinputfiles, "-")) {
 			if (strlen(**pinputfiles) > 4 && strcmp(**pinputfiles+strlen(**pinputfiles)-4, ".bz2") == 0) {
-				static char cmd[1024];
 				snprintf(cmd, sizeof(cmd)-1, "bunzip2 < %s", **pinputfiles);
 				debug(2, "Executing command '%s'", cmd);
 				f = popen(cmd, "r");
@@ -1416,7 +1416,8 @@ int main(int argc, char *argv[])
 			for (i=0; i<norigins; i++)
 				*as(&origin, origins[i]) = 0;
 		}
-		if (f != stdin) fclose(f);
+		if (cmd[0]) pclose(f);
+		else if (f != stdin) fclose(f);
 	}
 	if (progress) {
 		printf("\n");
