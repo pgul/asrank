@@ -715,6 +715,8 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 				inc = -1;
 #endif
 		}
+		if (tier1[asndx(aspath[i])] || *as(&ix, aspath[i]))
+			break;
 	}
 	if (leak)
 		*leak = (i == aspathlen) ? 0 : 1;
@@ -1705,10 +1707,11 @@ int main(int argc, char *argv[])
 			s[sizeof(s)-1] = '\0';
 			for (j=0; j<rel[i].nas_rel; j++) {
 				if (rel[i].as_rel[j].sure == 0) continue;
-				debug(6, "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, upstream: %d",
+				debug(6, "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
 				      printas(rel[i].as_rel[j].asn), s, rel[i].as_rel[j].sure,
 				      rel[i].as_rel[j].pass2 ? 1 : 0, rel[i].as_rel[j].n24, rel[i].as_rel[j].prefs,
-				      rel[i].as_rel[j].self, rel[i].as_rel[j].upstream ? 1 : 0);
+				      rel[i].as_rel[j].self, rel[i].as_rel[j].sibling ? 1 : 0,
+				      rel[i].as_rel[j].upstream ? 1 : 0);
 			}
 		}
 	}
