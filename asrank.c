@@ -489,6 +489,12 @@ static int make_rel2(struct rib_t *route, int preflen)
 			for (scan_pathes[i] = route->pathes[i]; scan_pathes[i]; scan_pathes[i] = scan_pathes[i]->prev) {
 				if (scan_pathes[i]->asn && tier1[asndx(scan_pathes[i]->asn)])
 					break;
+				if (scan_pathes[i]->asn && scan_pathes[i]->prev && scan_pathes[i]->prev->asn) {
+					if (mkrel(scan_pathes[i]->asn, scan_pathes[i]->prev->asn, 0)->sure > 0) {
+						scan_pathes[i] = NULL;
+						break;
+					}
+				}
 			}
 		}
 		nnext = 0;
@@ -554,53 +560,53 @@ static void make_rel5(asn_t *aspath, int pathlen)
 	int i, first, last;
 	int ab, ba;
 
-	first = last = 0;
+	first = last = -1;
 	for (i=0; i<pathlen; i++) {
 		if (tier1[asndx(aspath[i])] ||
 		    (i != 0 && i != pathlen-1 && *as(&ix, aspath[i]))) {
-			if (!first)
-				first = i+1;
+			if (first==-1)
+				first = i;
 			else
-				last = i+1;
+				last = i;
 		}
 	}
-	if (!first) return;
-	if (!last) last = first;
-	for (i=1; i+1<first; i++) {
+	if (first==-1) return;
+	if (last==-1) last = first;
+	for (i=1; i<first; i++) {
 		if ((ab = mkrel(aspath[i], aspath[i-1], 0)->sure) == -1) {
-			first = i;
+			first = i-1;
 			break;
 		}
 		if (ab == 4) continue;
 		if ((ba = mkrel(aspath[i-1], aspath[i], 0)->sure) >= 3) {
-			first = i;
+			first = i-1;
 			break;
 		}
 		if (ab == 2 && ba == 2) {
-			first = i;
+			first = i-1;
 			break;
 		}
 	}
-	for (i=last+1; i<pathlen; i++) {
+	for (i=pathlen-1; i>last; i--) {
 		if ((ab = mkrel(aspath[i-1], aspath[i], 0)->sure) == -1) {
-			last = i+1;
+			last = i;
 			break;
 		}
 		if (ab == 4) continue;
 		if ((ba = mkrel(aspath[i], aspath[i-1], 0)->sure) >= 3) {
-			last = i+1;
+			last = i;
 			break;
 		}
 		if (ab == 2 && ba == 2) {
-			last = i+1;
+			last = i;
 			break;
 		}
 	}
 	/* relations for IX already set */
 	for (i=1; i<pathlen; i++) {
-		if (i+1<first || (i+1==first && last==first+1))
+		if (i<first || (i==first && last==first+1))
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
-		if (i>last || (i == last && last == first+1))
+		if (i>last+1 || (i == last+1 && last == first+1))
 			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
 	}
 }
@@ -690,6 +696,7 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 
 	ilast = 0;
 	inc = 1; /* 1 - going up, 3 - going down */
+	if (leak) *leak = 0;
 	if (!asndx(aspath[0]) || asndx(aspath[0]) >= old_nas)
 		return 0;
 	for (i=1; i<aspathlen; i++) {
@@ -700,11 +707,13 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 		if (crel1->pass2 && !crel2->pass2) {
 			if (inc == 1)
 				ilast = i;
-			else
+			else {
+				if (leak) *leak = 1;
 				break;
+			}
 		} else if (crel2->pass2 && !crel1->pass2) {
+			if (!leak) break;
 			inc = 3;
-			if (!leak) return ilast;
 		} else if (crel1->sibling && inc == 1) {
 			ilast = i;
 #if 0 /* treat peering as unknown */
@@ -715,11 +724,11 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 				inc = -1;
 #endif
 		}
-		if (tier1[asndx(aspath[i])] || *as(&ix, aspath[i]))
-			break;
+		if ((tier1 && tier1[asndx(aspath[i])]) || *as(&ix, aspath[i])) {
+			if (!leak) break;
+			inc = 3;
+		}
 	}
-	if (leak)
-		*leak = (i == aspathlen) ? 0 : 1;
 	return ilast;
 }
 
@@ -806,9 +815,9 @@ static int collect_stats(struct rib_t *route, int preflen)
 						*p++ = '>';
 						if (crel2->sibling)
 							*p++ = '=';
-						if (j<aspathlen-1) {
+						if (j<aspathlen-jlast-1) {
 							crel2 = mkrel(route_aspath[j], route_aspath[j+1], 0);
-							if (!crel2->pass2 && j < aspathlen-jlast-1
+							if (!crel2->pass2
 							    /* && (crel1->sure == -1 || crel2->sure == -1) */)
 								*p++ = '!';
 						}
@@ -1447,6 +1456,7 @@ int main(int argc, char *argv[])
 		proutes = calloc(nas, sizeof(proutes[0]));
 	}
 	maxroutes(&rootpath);
+	if (tier1) free(tier1);
 	tier1 = calloc(nas, sizeof(tier1[0]));
 	if (ntier1) {
 		for (i=0; i<ntier1; i++)
@@ -1580,7 +1590,6 @@ int main(int argc, char *argv[])
 	}
 	/* repeat pass 6? */
 	debug(1, "Pass 6 complete");
-	free(tier1);
 	/* add relations for "a - b > c"  ->   a > b and others like this? */
 	debug(1, "AS relations built");
 	debug(1, "%d pathes to tier1, %d pathes via tier1, %d pathes avoid tier1", totier1, viatier1, horlinks);
@@ -1624,8 +1633,8 @@ int main(int argc, char *argv[])
 				char *p = strdup(printas(asnum[i]));
 				debug(4, "%s is upstream for %s", p, printas(rel[i].as_rel[j].asn));
 				free(p);
-				nuplinks[i]++;
-				nclients[asndx(rel[i].as_rel[j].asn)]++;
+				nclients[i]++;
+				nuplinks[asndx(rel[i].as_rel[j].asn)]++;
 				rel[i].as_rel[j].upstream = 1;
 			} else if (rel[i].as_rel[j].sure <= 0 && r->sure <= 0)
 				npeerings[i]++;
@@ -1777,6 +1786,7 @@ int main(int argc, char *argv[])
 				free(rel[i].as_rel);
 		free(rel);
 	}
+	if (tier1) free(tier1);
 	if (save_fname) {
 		debug(1, "Saving table to %s", save_fname);
 		save_table(save_fname);
