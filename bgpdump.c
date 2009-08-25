@@ -81,12 +81,19 @@ static int process_attr(int assize, uint32_t *aspath)
 		attr_len = buf.len-buf.pos;
 	}
 	aspathlen = 0;
-	while (attr_len >= 3) {
+	while (attr_len > 0) {
+		if (attr_len < 3) {
+			get_buf(&buf, attr_len, NULL);
+			break;
+		}
 		if (get_buf(&buf, 1, &flag)) break;
 		if (get_buf(&buf, 1, &type)) break;
 		attr_len -= 2;
 		if (flag & BGP_ATTR_FLAG_EXTLEN) {
-			if (attr_len<2) break;
+			if (attr_len < 2) {
+				get_buf(&buf, attr_len, NULL);
+				break;
+			}
 			if (get_buf(&buf, 2, &i16)) break;
 			len = ntohs(i16);
 			attr_len -= 2;
@@ -95,7 +102,10 @@ static int process_attr(int assize, uint32_t *aspath)
 			len = i8;
 			attr_len--;
 		}
-		if (attr_len < len) break;
+		if (attr_len < len) {
+			get_buf(&buf, attr_len, NULL);
+			break;
+		}
 		attr_len -= len;
 		switch (type) {
 			case BGP_ATTR_AS_PATH:
@@ -154,8 +164,12 @@ static int read_prefix_list(struct buf_t *buf, int len, struct preflist **prefli
 	n = 0;
 	while (len > 0) {
 		if (get_buf(buf, 1, &i8)) return n;
+		len--;
 		i32 = 0;
-		if ((i8+7)/8 > len-1) return n;
+		if ((i8+7)/8 > len || len > 32) {
+			get_buf(buf, len, NULL);
+			return n;
+		}
 		if (get_buf(buf, (i8+7)/8, &i32)) return n;
 		if (*preflist_size <= n) {
 			*preflist_size = (*preflist_size+4)*2;
@@ -164,7 +178,7 @@ static int read_prefix_list(struct buf_t *buf, int len, struct preflist **prefli
 		preflist[0][n].len = i8;
 		preflist[0][n].ip  = i32;
 		n++;
-		len -= 1+(i8+7)/8;
+		len -= (i8+7)/8;
 	}
 	return n;
 }
@@ -351,10 +365,10 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					warning("bgp update truncated %d bytes from withdraw (size %d)", i16-(buf.len-buf.pos), buf.len);
 					i16 = buf.len-buf.pos;
 				} else if (j) {
-						warning("bgp update truncated %d bytes to %d size", j, buf.len);
+					warning("bgp update truncated %d bytes to %d size", j, buf.len);
 				}
 				wthdr_num = read_prefix_list(&buf, i16, &withdraw, &wthdr_max);
-				if (buf.len-buf.pos>2) {
+				if (buf.len-buf.pos > 2) {
 					process_attr(assize,  entry->aspath[0]);
 					pref_num = read_prefix_list(&buf, buf.len-buf.pos, &announce, &pref_max);
 				} else
