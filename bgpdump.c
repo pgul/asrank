@@ -166,7 +166,7 @@ static int read_prefix_list(struct buf_t *buf, int len, struct preflist **prefli
 		if (get_buf(buf, 1, &i8)) return n;
 		len--;
 		i32 = 0;
-		if ((i8+7)/8 > len || len > 32) {
+		if ((i8+7)/8 > len || i8 > 32) {
 			get_buf(buf, len, NULL);
 			return n;
 		}
