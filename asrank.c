@@ -1302,8 +1302,12 @@ int main(int argc, char *argv[])
 					if (firstas == entry.aspath[0][0])
 						break;
 				}
-				if (i<pprefix[0]->npathes)
+				if (i<pprefix[0]->npathes) {
+					for (j=0; entry.aspath[i][j]; j++);
+					debug(8, "%s/%d|%s|%s - neighbor as already exists for this prefix, skipped",
+					   printip(entry.prefix), entry.preflen, printas(entry.origas[0]), printaspath(entry.aspath[0], j));
 					continue;
+				}
 				/* new origin, add it */
 				if (pprefix[0]->npathes >= MAXPATHES) {
 					warning("Too many pathes for %s/%d, rest ignored", printip(entry.prefix), entry.preflen);
