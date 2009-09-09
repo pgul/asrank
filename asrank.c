@@ -414,10 +414,10 @@ static void make_rel1(asn_t *aspath, int pathlen)
 	for (i=1; i<pathlen; i++) {
 		if (i+1<first || (i+1==first && last==first+1) ||
 		    (i+1==first && *as(&ix, aspath[i])))
-			mkrel(aspath[i], aspath[i-1], 2);
+			mkrel(aspath[i], aspath[i-1], mkrel(aspath[i], aspath[i-1], 0)->sibling ? 3 : 2);
 		if (i>last || (i == last && last == first+1) ||
 		    (i == last && *as(&ix, aspath[i-1])))
-			mkrel(aspath[i-1], aspath[i], 2);
+			mkrel(aspath[i-1], aspath[i], mkrel(aspath[i-1], aspath[i], 0)->sibling ? 3 : 2);
 	}
 }
 
@@ -504,7 +504,7 @@ static int make_rel2(struct rib_t *route, int preflen)
 			if (nextas[j=asndx(newasn)] == 0) {
 				nextas_arr[nnext++] = j;
 				nextas[j] = 1;
-				mkrel(newasn, asn, 0)->self += nets;
+				mkrel(newasn, route->pathes[i]->asn, 0)->self += nets;
 			}
 		}
 		for (i=0; i<nnext; i++)
@@ -785,7 +785,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 				addconeas(coneas_gr, ups, route_aspath[0]);
 			}
 		}
-		if (debuglevel >= 4) {
+		if (debuglevel >= 5 || (leak && debuglevel >= 4)) {
 			/* revert aspath direction */
 			static char pathstr[MAXPATHLEN*6];
 			char *p;
@@ -1625,11 +1625,12 @@ int main(int argc, char *argv[])
 	/* count nupstreams, npeerings, nclients */
 	nuplinks = calloc(nas, sizeof(*nuplinks));
 	npeerings = calloc(nas, sizeof(*npeerings));
-	nclients = calloc(nas, sizeof(*npeerings));
+	nclients = calloc(nas, sizeof(*nclients));
 	for (i=1; i<nas; i++)
 		for (j=0; j<rel[i].nas_rel; j++) {
 			struct rel_lem_t *r;
 
+			if (asnum[i] == rel[i].as_rel[j].asn) continue;
 			r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0);
 			if (rel[i].as_rel[j].sure > r->sure &&
 			    rel[i].as_rel[j].pass2 &&
@@ -1640,8 +1641,11 @@ int main(int argc, char *argv[])
 				nclients[i]++;
 				nuplinks[asndx(rel[i].as_rel[j].asn)]++;
 				rel[i].as_rel[j].upstream = 1;
-			} else if (rel[i].as_rel[j].sure <= 0 && r->sure <= 0)
+			} else if (rel[i].as_rel[j].sure <= 0 && r->sure <= 0) {
+				char *p = strdup(printas(asnum[i]));
+				debug(4, "peering %s-%s", p, printas(rel[i].as_rel[j].asn));
 				npeerings[i]++;
+			}
 		}
 
 	/* count degree for groups */
@@ -1652,7 +1656,7 @@ int main(int argc, char *argv[])
 		group_rel = calloc(ngroups, sizeof(*group_rel));
 		nuplinks_gr = calloc(ngroups, sizeof(*nuplinks_gr));
 		npeering_gr = calloc(ngroups, sizeof(*npeering_gr));
-		nclients_gr = calloc(ngroups, sizeof(*npeering_gr));
+		nclients_gr = calloc(ngroups, sizeof(*nclients_gr));
 		hasrel = calloc(nas, sizeof(*hasrel));
 		asrel = calloc(nas, sizeof(*asrel)); /* too many, it's only list of neighbors */
 		hasuplink = calloc(nas, sizeof(*hasuplink));
@@ -1663,15 +1667,16 @@ int main(int argc, char *argv[])
 		asclients = calloc(nas, sizeof(*asclients)); /* too many, it's only list of neighbors */
 		for (i=0; i<ngroups; i++) {
 			int nasrel, relas, nasuplink, naspeering, nasclients;
+			asn_t relasn;
 
 			nasrel = nasuplink = naspeering = nasclients = 0;
 			for (j=0; j<asgroup[i].nas; j++) {
 				if (asndx(asgroup[i].asn[j])==0)
 					continue;
 				for (k=0; k<rel[asndx(asgroup[i].asn[j])].nas_rel; k++) {
-					relas = asndx(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn);
-					if (*as(&group, rel[asndx(asgroup[i].asn[j])].as_rel[k].asn) == j+1)
+					if (*as(&group, (relasn=rel[asndx(asgroup[i].asn[j])].as_rel[k].asn)) == i+1)
 						continue; /* do not count inter-group relations */
+					relas = asndx(relasn);
 					if (hasrel[relas] == 0) {
 						hasrel[relas] = 1;
 						asrel[nasrel++] = relas;
@@ -1680,13 +1685,13 @@ int main(int argc, char *argv[])
 						hasuplink[relas] = 1;
 						asuplink[nasuplink++] = relas;
 					}
-					if (mkrel(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn, asgroup[i].asn[j], 0)->upstream &&
+					if (mkrel(relasn, asgroup[i].asn[j], 0)->upstream &&
 					    hasclients[relas] == 0) {
 						hasclients[relas] = 1;
 						asclients[nasclients++] = relas;
 					}
 					if (rel[asndx(asgroup[i].asn[j])].as_rel[k].sure <= 0 &&
-					    mkrel(rel[asndx(asgroup[i].asn[j])].as_rel[k].asn, asgroup[i].asn[j], 0) <= 0 &&
+					    mkrel(relasn, asgroup[i].asn[j], 0)->sure <= 0 &&
 					    haspeering[relas] == 0) {
 						haspeering[relas] = 1;
 						aspeering[naspeering++] = relas;
@@ -1696,11 +1701,11 @@ int main(int argc, char *argv[])
 			group_rel[i] = nasrel;
 			nuplinks_gr[i] = nasuplink;
 			npeering_gr[i] = naspeering;
-			nclients_gr[i] = naspeering;
+			nclients_gr[i] = nasclients;
 			for (j=0; j<nasrel; j++) hasrel[asrel[j]] = 0;
-			for (j=0; j<nasuplink; j++) hasuplink[asrel[j]] = 0;
-			for (j=0; j<naspeering; j++) haspeering[asrel[j]] = 0;
-			for (j=0; j<nasclients; j++) hasclients[asrel[j]] = 0;
+			for (j=0; j<nasuplink; j++) hasuplink[asuplink[j]] = 0;
+			for (j=0; j<naspeering; j++) haspeering[aspeering[j]] = 0;
+			for (j=0; j<nasclients; j++) hasclients[asclients[j]] = 0;
 		}
 		free(hasrel);
 		free(asrel);
@@ -1747,7 +1752,7 @@ int main(int argc, char *argv[])
 	}
 	for (i=1; i<nas; i++) {
 		printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
-		       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel,
+		       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel - 1,
 		       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
 		       *as(&withdr_n24, asnum[i]));
 	}
