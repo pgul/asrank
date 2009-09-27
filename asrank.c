@@ -151,6 +151,7 @@ char *printaspath(asn_t *aspath, int aspathlen)
 	int i;
 
 	p = printaspathbuf;
+	*p = '\0';
 	for (i=0; i<aspathlen; i++) {
 		if (i) *p++ = ' ';
 		strncpy(p, printas(aspath[i]), sizeof(printaspathbuf)-(p-printaspathbuf)-1);
@@ -528,6 +529,8 @@ static void make_rel4(struct rib_t *route)
 	noinv = 1;
 	for (i=0; i<route->npathes; i++) {
 		if (route->pathes[i]->noinv)
+			continue;
+		if (!route->pathes[i]->asn)
 			continue;
 		for (p=route->pathes[i]; p->prev->asn; p=p->prev) {
 			if (mkrel(p->prev->asn, p->asn, 0)->sure != 4 ||
@@ -1318,6 +1321,8 @@ int main(int argc, char *argv[])
 				peerlist = (peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes+1];
 			}
 			prefix = *pprefix;
+			if (entry.pathes == 0 && debuglevel >= 8)
+				debug(8, "%s/%d|%s| <no data>", printip(entry.prefix), entry.preflen, printas(entry.origas[i]));
 			for (i=0; i<entry.pathes; i++) {
 				int pathlen;
 				asn_t path[MAXPATHLEN];
@@ -1328,8 +1333,6 @@ int main(int argc, char *argv[])
 					for (j=0; entry.aspath[i][j]; j++);
 					debug(8, "%s/%d|%s|%s", printip(entry.prefix), entry.preflen, printas(entry.origas[i]), printaspath(entry.aspath[i], j));
 				}
-				if (entry.pathes == 0 && debuglevel >= 8)
-					debug(8, "%s/%d|%s| <no data>", printip(entry.prefix), entry.preflen, printas(entry.origas[i]));
 				/* exclude the same origins */
 				if (norigins >= MAXPATHES) {
 					warning("Too many routes for %s/%d", printip(entry.prefix), entry.preflen);
@@ -1425,6 +1428,8 @@ int main(int argc, char *argv[])
 							debug(5, "New ASN in update: %s", printas(path[j]));
 					}
 				}
+				if (pathlen == 0)
+					debug(5, "Empty aspath for %s/%d", printip(entry.prefix), entry.preflen);
 			}
 			if (peer(prefix) != peerlist)
 				bcopy(peerlist, peer(prefix), prefix->npathes*sizeof(peerndx_t));
