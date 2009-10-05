@@ -10,6 +10,7 @@ struct dump_entry {
 	uint32_t origas[MAXPATHES];
 	uint32_t peerip[MAXPATHES];
 	uint32_t aspath[MAXPATHES][MAXPATHLEN];
+	time_t create_time[MAXPATHES];
 };
 
 int open_dump(FILE *f);

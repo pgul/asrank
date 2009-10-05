@@ -30,8 +30,11 @@ struct aspath {
 	struct aspath *prev;
 	struct aspath **next;
 	asn_t asn;
-	int pathes:24;
-	int noinv:8;
+	int pathes:22;
+	int noinv:1;
+	int leak:1;
+	int clientspart:8;
+	time_t create_time;
 	uint16_t nnei;
 	uint16_t leaf;
 } rootpath;
@@ -52,6 +55,7 @@ struct rib_t {
 } *rib_root;
 
 asarr origin, wasas, ndx, updates, upd_n24, withdraw, withdr_n24, group, ix;
+asarr *trace;
 int *tier1, *routes, *proutes, *npath, *tier1_bad, *n24, *npref, *nextas;
 int *n24_gr, *npref_gr, *group_rel;
 int *updates_gr, *withdraw_gr, *upd_n24_gr, *withdr_n24_gr, *wasgroup;
@@ -59,6 +63,11 @@ int *own_n24, *own_n24_gr, *own_npref, *own_npref_gr;
 int *nuplinks, *npeerings, *nclients, *nuplinks_gr, *npeering_gr, *nclients_gr;
 char *upstreams, *ups_group;
 int *upstreams_arr, *ups_group_arr;
+struct trace_t {
+	int nrel;
+	asn_t *rel;
+} *trace_arr;
+int ntrace;
 asn_t *asnum;
 struct rel_t {
 	int nas_rel;
@@ -86,19 +95,24 @@ struct group_t {
 	asn_t *asn;
 } *asgroup, *asix;
 int horlinks, totier1, viatier1;
+char printasbuf1[20], printasbuf2[20];
+
+#define printas(a)	printasbuf(a, printasbuf1, sizeof(printasbuf1))
+#define printas2(a)	printasbuf(a, printasbuf2, sizeof(printasbuf2))
 
 static void usage(void)
 {
 	printf("Usage: asrank [-p] [-d level] [-t asn] [-x <asn|@fname>] [-g fname] [-w fname] [-u fname[,fname...]] [file ...]\n");
 	printf("  Options:\n");
-	printf("-t asn      - hint that asn is tier1\n");
-	printf("-x asn      - asn is internet exchange point\n");
-	printf("-x @fname   - file with IX list (one IX per line, comma separated for sibling)\n");
-	printf("-d level    - set debug level (5 and more cause huge output)\n");
-	printf("-p          - show progress bar\n");
-	printf("-g fname    - file defined sibling groups, one group per line, comma separated\n");
-	printf("-w fname    - write result table to fname for future processing\n");
-	printf("-u fname    - process file(s) with updates and generate separate statistics after it\n");
+	printf("-t asn       - hint that asn is tier1\n");
+	printf("-x asn       - asn is internet exchange point\n");
+	printf("-x @fname    - file with IX list (one IX per line, comma separated for sibling)\n");
+	printf("-d level     - set debug level (5 and more cause huge output)\n");
+	printf("-p           - show progress bar\n");
+	printf("-g fname     - file defined sibling groups, one group per line, comma separated\n");
+	printf("-w fname     - write result table to fname for future processing\n");
+	printf("-u fname     - process file(s) with updates and generate separate statistics after it\n");
+	printf("-T as1[:as2] - trace (debug level 4) relations for as1 or between as1 and as2\n");
 	printf("file - input dumb RIB table\n");
 }
 
@@ -132,21 +146,19 @@ static void freeas(asarr *arr)
 		}
 }
 
-char *printas(asn_t asn)
+char *printasbuf(asn_t asn, char *buf, int bufsize)
 {
-	static char printasbuf[20];
-
 	asn = ntohl(asn);
 	if (asn < 65536)
-		snprintf(printasbuf, sizeof(printasbuf)-1, "%u", asn);
+		snprintf(buf, bufsize-1, "%u", asn);
 	else
-		snprintf(printasbuf, sizeof(printasbuf)-1, "%u.%u", asn>>16, asn % 65536);
-	return printasbuf;
+		snprintf(buf, bufsize-1, "%u.%u", asn>>16, asn % 65536);
+	return buf;
 }
 
 char *printaspath(asn_t *aspath, int aspathlen)
 {
-	static char printaspathbuf[4096];
+	static char printaspathbuf[4096], prasbuf[32];
 	char *p;
 	int i;
 
@@ -154,7 +166,7 @@ char *printaspath(asn_t *aspath, int aspathlen)
 	*p = '\0';
 	for (i=0; i<aspathlen; i++) {
 		if (i) *p++ = ' ';
-		strncpy(p, printas(aspath[i]), sizeof(printaspathbuf)-(p-printaspathbuf)-1);
+		strncpy(p, printasbuf(aspath[i], prasbuf, sizeof(prasbuf)), sizeof(printaspathbuf)-(p-printaspathbuf)-1);
 		p += strlen(p);
 		if ((p-printaspathbuf) + 3 > sizeof(printaspathbuf)) break;
 	}
@@ -206,6 +218,20 @@ static void addconeas(struct coneas_t *coneas, int as1, asn_t as2)
 	}
 }
 
+static int needtrace(asn_t as1, asn_t as2)
+{
+	int i, j;
+
+	if (!trace) return 0;
+	if ((i=*as(trace, as1)) == 0) return 0;
+	if (i == -1) return 1;
+	if (*as(trace, as2) == -1) return 1;
+	for (j=trace_arr[--i].nrel-1; j>=0; j--)
+		if (as2 == trace_arr[i].rel[j])
+			return 1;
+	return 0;
+}
+
 static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 {
 	int left, right, new;
@@ -240,10 +266,15 @@ static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 		p->as_rel[new].asn = as2;
 	}
 	if (val != 0) {
-		if (val == -1)
+		if (val == -1) {
+			if (needtrace(as1, as2))
+				debug(4, "Set relations from %s to %s, sure = %d", printas(as1), printas2(as2), val);
 			p->as_rel[new].sure = -1; /* leak */
-		else if (val > p->as_rel[new].sure)
+		} else if (val > p->as_rel[new].sure) {
+			if (needtrace(as1, as2))
+				debug(4, "Set relations from %s to %s, sure = %d", printas(as1), printas2(as2), val);
 			p->as_rel[new].sure = val;
+		}
 	}
 	return &(p->as_rel[new]);
 }
@@ -265,6 +296,7 @@ static void maxroutes(struct aspath *aspath)
 			}
 			mkrel(aspath->next[i]->asn, aspath->asn, 0);
 		}
+		aspath->clientspart = aspath->leak = aspath->noinv = 0;
 		maxroutes(aspath->next[i]);
 	}
 }
@@ -313,7 +345,7 @@ static void foreach_aspath(void (*func)(asn_t *aspath, int pathlen))
 static int check_valid_path(asn_t *aspath, int pathlen)
 {
 	int i, seqlen, ret;
-	char s[16];
+	char s[64];
 
 	seqlen = ret = 0;
 	for (i=0; i<pathlen; i++) {
@@ -379,6 +411,7 @@ static void clean_noinv(struct aspath *aspath)
 static void make_rel1(asn_t *aspath, int pathlen)
 {
 	int i, t1, first, last;
+	struct rel_lem_t *rel;
 
 	first = last = t1 = 0;
 	for (i=0; i<pathlen; i++) {
@@ -397,6 +430,10 @@ static void make_rel1(asn_t *aspath, int pathlen)
 			/* sure, IX is upstream */
 			mkrel(aspath[i], aspath[i-1], 4)->pass2 = 1;
 			mkrel(aspath[i], aspath[i+1], 4)->pass2 = 1;
+			if (needtrace(aspath[i], aspath[i-1]))
+				debug(4, "Set pass2 (IX) from %s to %s (aspath %s)", printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
+			if (needtrace(aspath[i], aspath[i+1]))
+				debug(4, "Set pass2 (IX) from %s to %s (aspath %s)", printas(aspath[i]), printas2(aspath[i+1]), printaspath(aspath, pathlen));
 		}
 		if (i>0 &&
 		    ((*as(&group, aspath[i-1]) && *as(&group, aspath[i-1]) == *as(&group, aspath[i])) ||
@@ -414,11 +451,31 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		viatier1++;
 	for (i=1; i<pathlen; i++) {
 		if (i+1<first || (i+1==first && last==first+1) ||
-		    (i+1==first && *as(&ix, aspath[i])))
-			mkrel(aspath[i], aspath[i-1], mkrel(aspath[i], aspath[i-1], 0)->sibling ? 3 : 2);
+		    (i+1==first && *as(&ix, aspath[i]))) {
+			rel = mkrel(aspath[i], aspath[i-1], 0);
+			if (needtrace(aspath[i], aspath[i-1]) && rel->sure < (rel->sibling ? 3 : 2))
+				debug(4, "Set sure=%d (tier1 or IX) from %s to %s (aspath %s)", 
+				      rel->sibling ? 3 : 2,
+				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
+			if (rel->sibling) {
+				if (rel->sure < 3) rel->sure = 3;
+			} else {
+				if (rel->sure < 2) rel->sure = 2;
+			}
+		}
 		if (i>last || (i == last && last == first+1) ||
-		    (i == last && *as(&ix, aspath[i-1])))
-			mkrel(aspath[i-1], aspath[i], mkrel(aspath[i-1], aspath[i], 0)->sibling ? 3 : 2);
+		    (i == last && *as(&ix, aspath[i-1]))) {
+			rel = mkrel(aspath[i-1], aspath[i], 0);
+			if (needtrace(aspath[i-1], aspath[i]) && rel->sure < (rel->sibling ? 3 : 2))
+				debug(4, "Set sure=%d (tier1 or IX) from %s to %s (aspath %s)", 
+				      rel->sibling ? 3 : 2,
+				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
+			if (rel->sibling) {
+				if (rel->sure < 3) rel->sure = 3;
+			} else {
+				if (rel->sure < 2) rel->sure = 2;
+			}
+		}
 	}
 }
 
@@ -428,17 +485,26 @@ static int make_rel2(struct rib_t *route, int preflen)
 	static int nextas_arr[MAXPATHES];
 	int i, j, nnext, nets, asx;
 	asn_t asn, newasn;
+	static uint32_t curip;
 
 	if (route == NULL) return 0;
 	nets = 0;
 	if (route->left)
 		nets += make_rel2(route->left, preflen+1);
-	if (route->right)
+	if (route->right) {
+		curip |= mask[preflen];
 		nets += make_rel2(route->right, preflen+1);
+		curip &= ~mask[preflen];
+	}
 	if (!route->npathes)
 		return nets;
+#if 0
 	if (route->npathes == 1 && rootpath.nnei > 1)
 		/* only single path for this prefix - ignore (error?) */
+#else
+	if (route->npathes*2 < rootpath.nnei)
+		/* route exists less then on half points of view - ignore */
+#endif
 		return nets;
 	nets = (1<<(24-preflen)) - nets; /* value of the current route */
 	for (i=0; i<route->npathes; i++)
@@ -461,13 +527,18 @@ static int make_rel2(struct rib_t *route, int preflen)
 		}
 		newasn = 0;
 		for (j=0; j<nnext; j++) {
-			if (nextas[nextas_arr[j]]*2 > route->npathes)
+			if (nextas[nextas_arr[j]]*2 > route->npathes) {
 				newasn = asnum[nextas_arr[j]];
+				i = nextas[nextas_arr[j]];
+			}
 			nextas[nextas_arr[j]] = 0;
 		}
 		if (newasn == 0)
 			break;
 		if (asn) {
+			if (needtrace(newasn, asn) && mkrel(newasn, asn, 0)->sure<3)
+				debug(4, "Set %s to %s sure=3: %s/%d seen from %d of %d pathes",
+				      printas(newasn), printas2(asn), printip(curip), preflen, i, route->npathes);
 			mkrel(newasn, asn, 3);
 			if (*as(&ix, newasn))
 				break;
@@ -490,7 +561,7 @@ static int make_rel2(struct rib_t *route, int preflen)
 			for (scan_pathes[i] = route->pathes[i]; scan_pathes[i]; scan_pathes[i] = scan_pathes[i]->prev) {
 				if (scan_pathes[i]->asn && tier1[asndx(scan_pathes[i]->asn)])
 					break;
-				if (scan_pathes[i]->asn && scan_pathes[i]->prev && scan_pathes[i]->prev->asn) {
+				if (scan_pathes[i]->asn && scan_pathes[i]->prev && scan_pathes[i]->prev->asn && scan_pathes[i] != route->pathes[i]) {
 					if (mkrel(scan_pathes[i]->asn, scan_pathes[i]->prev->asn, 0)->sure > 0) {
 						scan_pathes[i] = NULL;
 						break;
@@ -545,10 +616,7 @@ static void make_rel4(struct rib_t *route)
 				if (!p1->asn) break;
 			}
 			if (j != route->npathes) {
-				char s[16];
-				strncpy(s, printas(p->prev->asn), sizeof(s));
-				s[sizeof(s)-1] = '\0';
-				debug(4, "Route leak: from %s to %s", s, printas(p->asn));
+				debug(6, "Route leak: from %s to %s", printas(p->prev->asn), printas2(p->asn));
 				mkrel(p->asn, p->prev->asn, -1);
 			} else
 				noinv = 0;
@@ -607,10 +675,18 @@ static void make_rel5(asn_t *aspath, int pathlen)
 	}
 	/* relations for IX already set */
 	for (i=1; i<pathlen; i++) {
-		if (i<first || (i==first && last==first+1))
+		if (i<first || (i==first && last==first+1)) {
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
-		if (i>last+1 || (i == last+1 && last == first+1))
+			if (needtrace(aspath[i], aspath[i-1]))
+				debug(4, "Set pass2 from %s to %s (aspath %s)", 
+				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
+		}
+		if (i>last+1 || (i == last+1 && last == first+1)) {
 			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
+			if (needtrace(aspath[i-1], aspath[i]))
+				debug(4, "Set pass2 from %s to %s (aspath %s)", 
+				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
+		}
 	}
 }
 
@@ -651,9 +727,16 @@ static void make_rel6(asn_t *aspath, int pathlen)
 	}
 	for (i=1; i<pathlen; i++) {
 		if (i<=ifirst) {
+			if (needtrace(aspath[i], aspath[i-1]) && mkrel(aspath[i], aspath[i-1], 0)->sure == 0)
+				debug(4, "Set sure=1 from %s to %s (aspath %s)", 
+				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			mkrel(aspath[i], aspath[i-1], 1);
-		} else if (i>ilast)
+		} else if (i>ilast) {
+			if (needtrace(aspath[i-1], aspath[i]) && mkrel(aspath[i-1], aspath[i], 0)->sure == 0)
+				debug(4, "Set sure=1 from %s to %s (aspath %s)", 
+				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 			mkrel(aspath[i-1], aspath[i], 1);
+		}
 	}
 }
 
@@ -744,7 +827,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 	/* but recursion depth is not high (only 24), so I think this local vars are ok */
 	int i, j, aspathlen, jlast, ups, leak;
 	int nupstreams, nups_group;
-	struct aspath *pt;
+	struct aspath *pt, *prevpt;
 	struct rel_lem_t *crel1, *crel2;
 	
 	nets = 0;
@@ -767,26 +850,37 @@ static int collect_stats(struct rib_t *route, int preflen)
 	nupstreams = nups_group = 0;
 	for (i=0; i<route->npathes; i++) {
 		aspathlen = 0;
-		for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
-			route_aspath[aspathlen++] = pt->asn;
-		/* aspath is in reverse order! */
-		leak = 0;
-		jlast = clientspart(route_aspath, aspathlen, &leak);
+		if (route->pathes[i]->clientspart) {
+			jlast = route->pathes[i]->clientspart-1;
+			leak = route->pathes[i]->leak;
+		} else {
+			for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
+				route_aspath[aspathlen++] = pt->asn;
+			/* aspath is in reverse order! */
+			leak = 0;
+			jlast = clientspart(route_aspath, aspathlen, &leak);
+			route->pathes[i]->leak = leak;
+			route->pathes[i]->clientspart = jlast+1;
+		}
+		pt = route->pathes[i];
+		prevpt = NULL;
 		for (j=0; j<=jlast; j++) {
-			ups = asndx(route_aspath[j]);
-			addconeas(coneas, ups, route_aspath[0]);
+			ups = asndx(pt->asn);
+			addconeas(coneas, ups, route->pathes[i]->asn);
 			if (upstreams[ups] == 0) {
 				upstreams[ups] = 1;
 				upstreams_arr[nupstreams++] = ups;
-				addclients(nets, ups, (j>0) ? route_aspath[j-1] : route_aspath[0]);
+				addclients(nets, ups, prevpt ? prevpt->asn : pt->asn);
 			}
 			if ((ups = *as(&group, asnum[ups]))) {
 				if (ups_group[--ups] == 0) {
 					ups_group[ups] = 1;
 					ups_group_arr[nups_group++] = ups;
 				}
-				addconeas(coneas_gr, ups, route_aspath[0]);
+				addconeas(coneas_gr, ups, route->pathes[i]->asn);
 			}
+			prevpt = pt;
+			pt = pt->prev;
 		}
 		if (debuglevel >= 5 || (leak && debuglevel >= 4)) {
 			/* revert aspath direction */
@@ -794,6 +888,9 @@ static int collect_stats(struct rib_t *route, int preflen)
 			char *p;
 			asn_t tmp_asn;
 
+			if (!aspathlen)
+				for (pt = route->pathes[i]; pt->asn; pt = pt->prev)
+					route_aspath[aspathlen++] = pt->asn;
 			for (j=aspathlen/2-1; j>=0; j--) {
 				tmp_asn = route_aspath[j];
 				route_aspath[j] = route_aspath[aspathlen-1-j];
@@ -835,7 +932,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 				if ((p-pathstr) > sizeof(pathstr)-3) break;
 			}
 			if (leak) strncpy(p, " (!)", sizeof(pathstr) - (p-pathstr) - 1);
-			debug(leak ? 4 : 5, "%s/%d: %s", printip(curip), preflen, pathstr);
+			debug(leak ? 4 : 5, "%s/%d: %s %lu", printip(curip), preflen, pathstr, (unsigned long)route->pathes[i]->create_time);
 		}
 	}
 	for (i=0; i<nupstreams; i++) {
@@ -860,11 +957,10 @@ asn_t readasn(char *str)
 	char *p;
 	asn_t asn;
 
-	if ((p=strchr(str, '.'))) {
-		*p = '\0';
+	for (p=str; isdigit(*p); p++);
+	if (*p == '.')
 		asn = (atoi(str)<<16) + atoi(p+1);
-		*p = '.';
-	} else
+	else
 		asn = atoi(str);
 	return htonl(asn);
 }
@@ -1055,6 +1151,23 @@ void readaslist(char *fname, asarr *group, struct group_t **asgroup, int *ngroup
 	fclose(f);
 }
 
+static void addtrace(asn_t as1, asn_t as2)
+{
+	int i;
+	if ((i = *as(trace, as1)) == -1)
+		return;
+	if (i == 0) {
+		i = ntrace++;
+		*as(trace, as1) = ntrace;
+		trace_arr = realloc(trace_arr, ntrace * sizeof(*trace_arr));
+		trace_arr[i].nrel = 0;
+		trace_arr[i].rel = NULL;
+	} else
+		i--;
+	trace_arr[i].rel = realloc(trace_arr[i].rel, (trace_arr[i].nrel+1) * sizeof(trace_arr[i].rel[0]));
+	trace_arr[i].rel[trace_arr[i].nrel++] = as2;
+}
+
 int main(int argc, char *argv[])
 {
 	int ch, i, j, k;
@@ -1075,7 +1188,7 @@ int main(int argc, char *argv[])
 	save_fname = groupfile = ixfile = NULL;
 	npinputfiles = 1;
 	pinputfiles = calloc(npinputfiles+1, sizeof(*pinputfiles));
-	while ((ch = getopt(argc, argv, "sd:ht:pg:w:u:x:")) != -1) {
+	while ((ch = getopt(argc, argv, "sd:ht:pg:w:u:x:T:")) != -1) {
 		switch (ch) {
 			case 'd':	debuglevel = atoi(optarg); break;
 			case 'p':	progress = 1; break;
@@ -1104,6 +1217,16 @@ int main(int argc, char *argv[])
 					pinputfiles = realloc(pinputfiles, (npinputfiles+2)*sizeof(*pinputfiles));
 					pinputfiles[npinputfiles++] = inputfiles;
 					pinputfiles[npinputfiles] = NULL;
+					break;
+			case 'T':	if (!trace) trace = calloc(1, sizeof(asarr));
+					if ((p = strchr(optarg, ':'))) {
+						asn_t as1, as2;
+						as1 = readasn(optarg);
+						as2 = readasn(p+1);
+						addtrace(as1, as2);
+						addtrace(as2, as1);
+					} else
+						*as(trace, readasn(optarg)) = -1;
 					break;
 		}
 	}
@@ -1162,7 +1285,7 @@ int main(int argc, char *argv[])
 
 		debug(1, "Parsing input file %s", **pinputfiles);
 		while (read_dump(f, &entry) == 0) {
-			int norigins, aspathlen, pref_n24;
+			int norigins, aspathlen, pref_n24, leak;
 			int origins[MAXPATHES];
 			struct rib_t *prefix, **pprefix;
 			struct aspath *ap, *prevap;
@@ -1203,8 +1326,12 @@ int main(int argc, char *argv[])
 						error("Internal error in data structures (leaf==0 for existing prefix)");
 						continue;
 					}
-					if (--(ap->leaf) == 0)
+					leak = 0;
+					if (--(ap->leaf) == 0) {
 						aspathes--;
+						if (ap->leak)
+							leak = 1;
+					}
 					/* decrease pathes for each aspath objects in this path */
 					/* free unused aspath structures to delete withdrawed as relations */
 					aspathlen = 0;
@@ -1213,7 +1340,7 @@ int main(int argc, char *argv[])
 							error("Internal error in data structures (path==0 for existing aspath), as%s", printas(ap->asn));
 							break;
 						}
-						if (entry.withdraw == 1)
+						if (entry.withdraw == 1 || leak)
 							aspath[aspathlen++] = ap->asn;
 						prevap = ap->prev;
 						if (ap->pathes == 0) {
@@ -1245,7 +1372,11 @@ int main(int argc, char *argv[])
 						ap = prevap;
 					}
 					if (entry.withdraw == 1) {
-						for (j = clientspart(aspath, aspathlen, NULL); j>=0; j--) {
+						if ((j = pprefix[0]->pathes[i]->clientspart))
+							j--;
+						else
+							j = clientspart(aspath, aspathlen, NULL);
+						for (; j>=0; j--) {
 							*as(&withdraw, aspath[j]) += 1;
 							*as(&withdr_n24, aspath[j]) += pref_n24;
 							if ((k = *as(&group, aspath[j]))) {
@@ -1264,6 +1395,8 @@ int main(int argc, char *argv[])
 					bcopy(&pprefix[0]->pathes[pprefix[0]->npathes+1], &pprefix[0]->pathes[pprefix[0]->npathes], i*sizeof(peerndx_t));
 					bcopy((peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes+1]+i+1,
 					      (peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes]+i, (pprefix[0]->npathes-i)*sizeof(peerndx_t));
+					if (leak && debuglevel >= 4)
+						debug(4, "Route-leak removed: %s (%lu)", printaspath(aspath, aspathlen), (unsigned long)entry.create_time[i]);
 					if (pprefix[0]->npathes == 0) {
 						debug(6, "Prefix %s/%d removed (%s)", printip(entry.prefix), entry.preflen, entry.withdraw==1 ? "withdraw" : "update");
 						fullview--;
@@ -1407,8 +1540,10 @@ int main(int argc, char *argv[])
 					curpath = curpath->next[new];
 					curpath->pathes++;
 				}
-				if (!curpath->leaf)
+				if (!curpath->leaf) {
 					aspathes++;
+					curpath->create_time = entry.create_time[i];
+				}
 				if (curpath->leaf == (1ul<<(sizeof(curpath->leaf)*8))-1)
 					error("Too many prefixes for same aspath (%u), increase sizeof(leaf)!", curpath->leaf);
 				else
@@ -1563,6 +1698,7 @@ int main(int argc, char *argv[])
 				continue;
 			if ((r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0)) <= 0)
 				continue;
+			/* todo: trace */
 			if (r->self == 0) {
 				if (rel[i].as_rel[j].self*2 > own_n24[asndx(rel[i].as_rel[j].asn)])
 					rel[i].as_rel[j].sure = 4;
@@ -1640,15 +1776,12 @@ int main(int argc, char *argv[])
 			if (rel[i].as_rel[j].sure > r->sure &&
 			    rel[i].as_rel[j].pass2 &&
 			    rel[i].as_rel[j].n24*64 > n24[asndx(rel[i].as_rel[j].asn)]) {
-				char *p = strdup(printas(asnum[i]));
-				debug(4, "%s is upstream for %s", p, printas(rel[i].as_rel[j].asn));
-				free(p);
+				debug(4, "%s is upstream for %s", printas(asnum[i]), printas2(rel[i].as_rel[j].asn));
 				nclients[i]++;
 				nuplinks[asndx(rel[i].as_rel[j].asn)]++;
 				rel[i].as_rel[j].upstream = 1;
 			} else if (rel[i].as_rel[j].sure <= 0 && r->sure <= 0) {
-				char *p = strdup(printas(asnum[i]));
-				debug(4, "peering %s-%s", p, printas(rel[i].as_rel[j].asn));
+				debug(4, "peering %s-%s", printas(asnum[i]), printas2(rel[i].as_rel[j].asn));
 				npeerings[i]++;
 			}
 		}
@@ -1722,15 +1855,17 @@ int main(int argc, char *argv[])
 		free(asclients);
 		debug(1, "degree for groups accounted");
 	}
-	if (debuglevel >= 6) {
+	if (debuglevel >= 6 || (debuglevel >= 4 && trace)) {
 		for (i=1; i<nas; i++) {
 			char s[16];
 
+			if (debuglevel < 6 && !*as(trace, asnum[i])) continue;
 			strncpy(s, printas(asnum[i]), sizeof(s));
 			s[sizeof(s)-1] = '\0';
 			for (j=0; j<rel[i].nas_rel; j++) {
 				if (rel[i].as_rel[j].sure == 0) continue;
-				debug(6, "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
+				debug(needtrace(rel[i].as_rel[j].asn, asnum[i]) ? 4 : 6,
+				     "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
 				      printas(rel[i].as_rel[j].asn), s, rel[i].as_rel[j].sure,
 				      rel[i].as_rel[j].pass2 ? 1 : 0, rel[i].as_rel[j].n24, rel[i].as_rel[j].prefs,
 				      rel[i].as_rel[j].self, rel[i].as_rel[j].sibling ? 1 : 0,

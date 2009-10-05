@@ -203,7 +203,7 @@ static int read_next_update(struct dump_entry *entry)
 
 int read_dump(FILE *f, struct dump_entry *entry)
 {
-	uint32_t i32, etype, elen;
+	uint32_t i32, etype, elen, etime;
 	uint16_t i16, entry_count;
 	static uint16_t peer_count;
 	u_char preflen, peer_type, i8, c;
@@ -213,7 +213,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 	if (read_next_update(entry))
 		return 0;
 	for (;;) {
-		if (fread(&i32,   4, 1, f) != 1) return -1; /* time */
+		if (fread(&etime, 4, 1, f) != 1) return -1;
 		if (fread(&etype, 4, 1, f) != 1) return -1;
 		if (fread(&elen,  4, 1, f) != 1) return -1;
 		buf.len = ntohl(elen);
@@ -284,7 +284,8 @@ int read_dump(FILE *f, struct dump_entry *entry)
 						entry->peerip[entry->pathes] = peer[i16].ip;
 					} else
 						warning("Too big peer index %d", i16);
-					get_buf(&buf, 4, NULL);	/* originated time */
+					get_buf(&buf, 4, &i32);	/* originated time */
+					entry->create_time[entry->pathes] = ntohl(i32);
 					/* process attribute */
 					if (process_attr(4, entry->aspath[entry->pathes]) == 1) {
 						if (entry->pathes >= MAXPATHES) {
@@ -303,7 +304,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				if (get_buf(&buf, 4, &entry->prefix)) break;
 				if (get_buf(&buf, 1, &preflen)) break;
 				entry->preflen = preflen;
-				if (get_buf(&buf, 5, NULL)) break; /* status, time */
+				if (get_buf(&buf, 5, NULL)) break; /* status, uptime */
 				if (get_buf(&buf, 4, &(entry->peerip[0]))) break;
 				if (etype == BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS) {
 					assize = 4;
@@ -315,8 +316,9 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				}
 				if (process_attr(assize, entry->aspath[0]) != 1)
 					continue;
-				entry->pathes = 1;
+				entry->create_time[0] = ntohl(etime);
 				entry->withdraw = 0;
+				entry->pathes = 1;
 				return 0;
 			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE:
 			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4:
@@ -374,6 +376,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				} else
 					pref_num = 0;
 				wthdr_ndx = pref_ndx = 0;
+				entry->create_time[0] = ntohl(etime);
 				entry->pathes = 1;
 				if (read_next_update(entry))
 					return 0;
@@ -416,6 +419,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					}
 					entry->origas[i] = entry->aspath[i][0];
 					entry->aspath[i][j] = 0;
+					entry->create_time[i] = 0;
 				}
 				return 0;
 			default:error("Unsupported format: type %d, subtype %d", etype>>16, etype & 0xffff);
