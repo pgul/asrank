@@ -1340,11 +1340,11 @@ int main(int argc, char *argv[])
 							error("Internal error in data structures (path==0 for existing aspath), as%s", printas(ap->asn));
 							break;
 						}
-						if (entry.withdraw == 1 || leak)
+						if (entry.withdraw == 1 || leak || debuglevel >= 6)
 							aspath[aspathlen++] = ap->asn;
 						prevap = ap->prev;
 						if (ap->pathes == 0) {
-							debug(6, "Free aspath");
+							if (debuglevel >= 6) debug(6, "Free aspath %s", printaspath(aspath, aspathlen));
 							if (ap->nnei || ap->next) {
 								error("Internal error in data structures (nnei==%d for unused aspath)", ap->nnei);
 								break;
