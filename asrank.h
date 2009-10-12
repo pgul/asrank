@@ -2,6 +2,9 @@
 #define MAXPATHLEN	256
 #define MAXPATHES	255
 
+#define MAJVER		0
+#define MINVER		3
+
 struct dump_entry {
 	uint32_t prefix;
 	int preflen;

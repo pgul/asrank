@@ -87,6 +87,7 @@ struct coneas_t {
 	int *asn;
 } *coneas, *coneas_gr;
 int nas, old_nas, ntier1, ntier1_hints, inv_pathes, fullview, aspathes;
+int *tier1_linked;
 asn_t tier1_arr[2048]; /* array for connections between tier1s should not be too large */
 uint32_t mask[24];
 int ngroups, nix;
@@ -317,6 +318,7 @@ static void add_tier1(struct aspath *aspath)
 				}
 				tier1_arr[ntier1++] = aspath->next[i]->asn;
 				tier1[asndx(aspath->next[i]->asn)] = 2;
+				debug(6, "Add tier1 candidate: %s", printas(aspath->next[i]->asn));
 			}
 		} else
 			add_tier1(aspath->next[i]);
@@ -344,14 +346,22 @@ static void foreach_aspath(void (*func)(asn_t *aspath, int pathlen))
 
 static int check_valid_path(asn_t *aspath, int pathlen)
 {
-	int i, seqlen, ret;
+	int i, seqlen, ret, firsttier1, lasttier1, maxseq;
 	char s[64];
 
-	seqlen = ret = 0;
+	seqlen = ret = firsttier1 = lasttier1 = maxseq = 0;
 	for (i=0; i<pathlen; i++) {
-		if (tier1[asndx(aspath[i])])
+		if (tier1[asndx(aspath[i])]) {
 			seqlen++;
-		else {
+			if (!firsttier1) firsttier1 = i+1;
+			lasttier1 = i+1;
+			if (seqlen > maxseq) maxseq = seqlen;
+			if (seqlen > 1) {
+				tier1_linked[tier1[asndx(aspath[i])]-1] = 1;
+				if (seqlen == 2)
+					tier1_linked[tier1[asndx(aspath[i-1])]-1] = 1;
+			}
+		} else {
 			if (seqlen > 2) {
 				tier1_bad[asndx(aspath[i-1])]++;
 				tier1_bad[asndx(aspath[i-seqlen])]++;
@@ -376,6 +386,10 @@ static int check_valid_path(asn_t *aspath, int pathlen)
 			s[sizeof(s)-1] = '\0';
 			debug(7, "Invalid path: %s (tier1 part: %s)", printaspath(aspath, pathlen), s);
 		}
+	}
+	if (firsttier1 && lasttier1-firsttier1 > maxseq-1) {
+		tier1_bad[asndx(aspath[firsttier1-1])]++;
+		tier1_bad[asndx(aspath[lasttier1-1])]++;
 	}
 	return ret;
 }
@@ -1230,6 +1244,7 @@ int main(int argc, char *argv[])
 					break;
 		}
 	}
+	debug(1, "ASRANK ver %d.%d", MAJVER, MINVER);
 	if (groupfile) {
 		readaslist(groupfile, &group, &asgroup, &ngroups);
 		debug(3, "groups file %s read, %d groups found", groupfile, ngroups);
@@ -1624,6 +1639,7 @@ int main(int argc, char *argv[])
 				if (tier1[i] == 0) {
 					tier1_arr[ntier1++] = asnum[i];
 					tier1[i] = 1;
+					debug(6, "Add tier1 candidate: %s", printas(asnum[i]));
 				}
 			}
 		}
@@ -1635,9 +1651,12 @@ int main(int argc, char *argv[])
 		free(routes);
 		free(proutes);
 		routes = proutes = NULL;
+		for (i=0; i<ntier1; i++)
+			tier1[asndx(tier1_arr[i])] = i+1;
 
 		npath = calloc(nas, sizeof(npath[0]));
 		foreach_aspath(get_npath);
+		tier1_linked = calloc(ntier1, sizeof(tier1_linked[0]));
 
 		for (;;) {
 			int maxndx;
@@ -1664,13 +1683,21 @@ int main(int argc, char *argv[])
 			}
 			debug(5, "%s is not tier1 (%d rate, %d pathes)", printas(tier1_arr[maxndx]),
 			      tier1_bad[asndx(tier1_arr[maxndx])], npath[asndx(tier1_arr[maxndx])]);
-			for (i=0; i<ntier1; i++)
-				if (tier1_arr[i])
-					tier1_bad[asndx(tier1_arr[i])] = 0;
 			tier1[asndx(tier1_arr[maxndx])] = 0;
 			tier1_arr[maxndx] = 0;
+			for (i=0; i<ntier1; i++) {
+				if (!tier1_arr[i]) continue;
+				tier1_bad[asndx(tier1_arr[i])] = 0;
+				if (!tier1_linked[i]) {
+					debug(5, "%s is not tier1 (not linked to any other candidated)", printas(tier1_arr[i]));
+					tier1[asndx(tier1_arr[i])] = 0;
+					tier1_arr[i] = 0;
+				} else
+					tier1_linked[i] = 0;
+			}
 		}
 		free(tier1_bad);
+		free(tier1_linked);
 		free(npath);
 
 		debug(1, "Tier1 list created");
