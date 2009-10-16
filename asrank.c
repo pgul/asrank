@@ -555,7 +555,7 @@ static int make_rel2(struct rib_t *route, int preflen)
 			break;
 		if (asn) {
 			if (needtrace(newasn, asn) && mkrel(newasn, asn, 0)->sure<3)
-				debug(4, "Set %s to %s sure=3: %s/%d seen from %d of %d pathes",
+				debug(4, "Set %s > %s sure=3: %s/%d seen from %d of %d pathes",
 				      printas(newasn), printas2(asn), printip(curip), preflen, i, route->npathes);
 			mkrel(newasn, asn, 3);
 			if (*as(&ix, newasn))
@@ -634,7 +634,8 @@ static void make_rel4(struct rib_t *route)
 				if (!p1->asn) break;
 			}
 			if (j != route->npathes) {
-				debug(6, "Route leak: from %s to %s", printas(p->prev->asn), printas2(p->asn));
+				debug(needtrace(p->asn, p->prev->asn) ? 4 : 6,
+				      "Route leak: from %s to %s", printas(p->prev->asn), printas2(p->asn));
 				mkrel(p->asn, p->prev->asn, -1);
 			} else
 				noinv = 0;
@@ -1731,17 +1732,36 @@ int main(int argc, char *argv[])
 				continue;
 			if ((r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0)) <= 0)
 				continue;
-			/* todo: trace */
 			if (r->self == 0) {
-				if (rel[i].as_rel[j].self*2 > own_n24[asndx(rel[i].as_rel[j].asn)])
+				if (rel[i].as_rel[j].self*2 > own_n24[asndx(rel[i].as_rel[j].asn)]) {
+					if (needtrace(asnum[i], rel[i].as_rel[j].asn))
+						if (rel[i].as_rel[j].sure < 4)
+							debug(4, "Set relations %s > %s sure=4 - >1/2 self prefixes",
+							      printas(asnum[i]), printas2(rel[i].as_rel[j].asn));
 					rel[i].as_rel[j].sure = 4;
-				else if (rel[i].as_rel[j].self > 0 && rel[i].as_rel[j].sure != 4)
-					rel[i].as_rel[j].sure = 3;
+				} else if (rel[i].as_rel[j].self > 0 && rel[i].as_rel[j].sure != 4) {
+					if (rel[i].as_rel[j].sure < 3) {
+						if (needtrace(asnum[i], rel[i].as_rel[j].asn))
+							debug(4, "Set relations %s > %s sure=3 - self prefixes",
+							      printas(asnum[i]), printas2(rel[i].as_rel[j].asn));
+						rel[i].as_rel[j].sure = 3;
+					}
+				}
 			} else if (rel[i].as_rel[j].sure == 0) {
-				if (r->self*2 > own_n24[i])
+				if (r->self*2 > own_n24[i]) {
+					if (needtrace(rel[i].as_rel[j].asn, asnum[i]))
+						if (r->sure < 4)
+							debug(4, "Set relations %s > %s sure=4 - >1/2 self prefixes",
+							      printas(rel[i].as_rel[j].asn), printas2(asnum[i]));
 					r->sure = 4;
-				else
-					r->sure = 3;
+				} else {
+					if (r->sure < 3) {
+						if (needtrace(rel[i].as_rel[j].asn, asnum[i]))
+							debug(4, "Set relations %s > %s sure=4 - >1/2 self prefixes",
+							      printas(rel[i].as_rel[j].asn), printas2(asnum[i]));
+						r->sure = 3;
+					}
+				}
 			}
 		}
 	}
