@@ -269,11 +269,11 @@ static struct rel_lem_t *mkrel(asn_t as1, asn_t as2, int val)
 	if (val != 0) {
 		if (val == -1) {
 			if (needtrace(as1, as2))
-				debug(4, "Set relations from %s to %s, sure = %d", printas(as1), printas2(as2), val);
+				debug(4, "Set relations %s > %s, sure = %d", printas(as1), printas2(as2), val);
 			p->as_rel[new].sure = -1; /* leak */
 		} else if (val > p->as_rel[new].sure) {
 			if (needtrace(as1, as2))
-				debug(4, "Set relations from %s to %s, sure = %d", printas(as1), printas2(as2), val);
+				debug(4, "Set relations %s > %s, sure = %d", printas(as1), printas2(as2), val);
 			p->as_rel[new].sure = val;
 		}
 	}
@@ -291,11 +291,15 @@ static void maxroutes(struct aspath *aspath)
 			if (proutes && proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
 				proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
 			if (aspath->next[i]->pathes > fullview/3) {
-				mkrel(aspath->asn, aspath->next[i]->asn, 4);
+				if (needtrace(aspath->next[i]->asn, aspath->asn))
+					if (mkrel(aspath->next[i]->asn, aspath->asn, 0)->sure < 4)
+						debug(4, "%s is upstream for %s (sure=4), >fullview/3 prefixes",
+						      printas(aspath->next[i]->asn), printas(aspath->asn));
+				mkrel(aspath->next[i]->asn, aspath->asn, 4);
 			} else {
-				mkrel(aspath->asn, aspath->next[i]->asn, 0);
+				mkrel(aspath->next[i]->asn, aspath->asn, 0);
 			}
-			mkrel(aspath->next[i]->asn, aspath->asn, 0);
+			mkrel(aspath->asn, aspath->next[i]->asn, 0);
 		}
 		aspath->clientspart = aspath->leak = aspath->noinv = 0;
 		maxroutes(aspath->next[i]);
@@ -445,9 +449,9 @@ static void make_rel1(asn_t *aspath, int pathlen)
 			mkrel(aspath[i], aspath[i-1], 4)->pass2 = 1;
 			mkrel(aspath[i], aspath[i+1], 4)->pass2 = 1;
 			if (needtrace(aspath[i], aspath[i-1]))
-				debug(4, "Set pass2 (IX) from %s to %s (aspath %s)", printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
+				debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			if (needtrace(aspath[i], aspath[i+1]))
-				debug(4, "Set pass2 (IX) from %s to %s (aspath %s)", printas(aspath[i]), printas2(aspath[i+1]), printaspath(aspath, pathlen));
+				debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i+1]), printaspath(aspath, pathlen));
 		}
 		if (i>0 &&
 		    ((*as(&group, aspath[i-1]) && *as(&group, aspath[i-1]) == *as(&group, aspath[i])) ||
@@ -468,7 +472,7 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		    (i+1==first && *as(&ix, aspath[i]))) {
 			rel = mkrel(aspath[i], aspath[i-1], 0);
 			if (needtrace(aspath[i], aspath[i-1]) && rel->sure < (rel->sibling ? 3 : 2))
-				debug(4, "Set sure=%d (tier1 or IX) from %s to %s (aspath %s)", 
+				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)", 
 				      rel->sibling ? 3 : 2,
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			if (rel->sibling) {
@@ -481,7 +485,7 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		    (i == last && *as(&ix, aspath[i-1]))) {
 			rel = mkrel(aspath[i-1], aspath[i], 0);
 			if (needtrace(aspath[i-1], aspath[i]) && rel->sure < (rel->sibling ? 3 : 2))
-				debug(4, "Set sure=%d (tier1 or IX) from %s to %s (aspath %s)", 
+				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)", 
 				      rel->sibling ? 3 : 2,
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 			if (rel->sibling) {
@@ -692,13 +696,13 @@ static void make_rel5(asn_t *aspath, int pathlen)
 		if (i<first || (i==first && last==first+1)) {
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
 			if (needtrace(aspath[i], aspath[i-1]))
-				debug(4, "Set pass2 from %s to %s (aspath %s)", 
+				debug(4, "Set pass2 %s > %s (aspath %s)", 
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 		}
 		if (i>last+1 || (i == last+1 && last == first+1)) {
 			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
 			if (needtrace(aspath[i-1], aspath[i]))
-				debug(4, "Set pass2 from %s to %s (aspath %s)", 
+				debug(4, "Set pass2 %s > %s (aspath %s)", 
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 		}
 	}
@@ -742,12 +746,12 @@ static void make_rel6(asn_t *aspath, int pathlen)
 	for (i=1; i<pathlen; i++) {
 		if (i<=ifirst) {
 			if (needtrace(aspath[i], aspath[i-1]) && mkrel(aspath[i], aspath[i-1], 0)->sure == 0)
-				debug(4, "Set sure=1 from %s to %s (aspath %s)", 
+				debug(4, "Set sure=1 %s > %s (aspath %s)", 
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			mkrel(aspath[i], aspath[i-1], 1);
 		} else if (i>ilast) {
 			if (needtrace(aspath[i-1], aspath[i]) && mkrel(aspath[i-1], aspath[i], 0)->sure == 0)
-				debug(4, "Set sure=1 from %s to %s (aspath %s)", 
+				debug(4, "Set sure=1 %s > %s (aspath %s)", 
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 			mkrel(aspath[i-1], aspath[i], 1);
 		}
@@ -791,11 +795,12 @@ static void addclients(int n24, int upstream, asn_t client)
 
 static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 {
-	int i, ilast, inc;
+	int i, ilast, inc, incleak;
 	struct rel_lem_t *crel1, *crel2;
 
 	ilast = 0;
 	inc = 1; /* 1 - going up, 3 - going down */
+	incleak = 1; /* 1 - going up, 3 - going down */
 	if (leak) *leak = 0;
 	if (!asndx(aspath[0]) || asndx(aspath[0]) >= old_nas)
 		return 0;
@@ -807,13 +812,14 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 		if (crel1->pass2 && !crel2->pass2) {
 			if (inc == 1)
 				ilast = i;
-			else {
-				if (leak) *leak = 1;
+			if (leak && incleak == 3 && crel2->sure < 3) {
+				*leak = 1;
 				break;
 			}
 		} else if (crel2->pass2 && !crel1->pass2) {
 			if (!leak) break;
 			inc = 3;
+			if (crel1->sure < 3) incleak = 3;
 		} else if (crel1->sibling && inc == 1) {
 			ilast = i;
 #if 0 /* treat peering as unknown */
@@ -826,7 +832,7 @@ static int clientspart(asn_t *aspath, int aspathlen, int *leak)
 		}
 		if ((tier1 && tier1[asndx(aspath[i])]) || *as(&ix, aspath[i])) {
 			if (!leak) break;
-			inc = 3;
+			inc = incleak = 3;
 		}
 	}
 	return ilast;
@@ -1892,7 +1898,7 @@ int main(int argc, char *argv[])
 			for (j=0; j<rel[i].nas_rel; j++) {
 				if (rel[i].as_rel[j].sure == 0) continue;
 				debug(needtrace(rel[i].as_rel[j].asn, asnum[i]) ? 4 : 6,
-				     "Relations from %s to %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
+				     "Relations %s > %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
 				      printas(rel[i].as_rel[j].asn), s, rel[i].as_rel[j].sure,
 				      rel[i].as_rel[j].pass2 ? 1 : 0, rel[i].as_rel[j].n24, rel[i].as_rel[j].prefs,
 				      rel[i].as_rel[j].self, rel[i].as_rel[j].sibling ? 1 : 0,
