@@ -68,7 +68,7 @@ struct trace_t {
 	asn_t *rel;
 } *trace_arr;
 int ntrace;
-asn_t *asnum;
+asn_t *asnum, as_reserved;
 struct rel_t {
 	int nas_rel;
 	struct rel_lem_t {
@@ -290,7 +290,8 @@ static void maxroutes(struct aspath *aspath)
 		if (aspath->asn) {
 			if (proutes && proutes[asndx(aspath->asn)] < aspath->next[i]->pathes)
 				proutes[asndx(aspath->asn)] = aspath->next[i]->pathes;
-			if (aspath->next[i]->pathes > fullview/3) {
+			if (aspath->next[i]->pathes > fullview/3 &&
+			    aspath->asn != as_reserved && aspath->next[i]->asn != as_reserved) {
 				if (needtrace(aspath->next[i]->asn, aspath->asn))
 					if (mkrel(aspath->next[i]->asn, aspath->asn, 0)->sure < 4)
 						debug(4, "%s is upstream for %s (sure=4), >fullview/3 prefixes",
@@ -446,12 +447,16 @@ static void make_rel1(asn_t *aspath, int pathlen)
 			else
 				last = i+1;
 			/* sure, IX is upstream */
-			mkrel(aspath[i], aspath[i-1], 4)->pass2 = 1;
-			mkrel(aspath[i], aspath[i+1], 4)->pass2 = 1;
-			if (needtrace(aspath[i], aspath[i-1]))
-				debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
-			if (needtrace(aspath[i], aspath[i+1]))
-				debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i+1]), printaspath(aspath, pathlen));
+			if (aspath[i-1] != as_reserved) {
+				mkrel(aspath[i], aspath[i-1], 4)->pass2 = 1;
+				if (needtrace(aspath[i], aspath[i-1]))
+					debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
+			}
+			if (aspath[i+1] != as_reserved) {
+				mkrel(aspath[i], aspath[i+1], 4)->pass2 = 1;
+				if (needtrace(aspath[i], aspath[i+1]))
+					debug(4, "Set pass2 (IX) %s > %s (aspath %s)", printas(aspath[i]), printas2(aspath[i+1]), printaspath(aspath, pathlen));
+			}
 		}
 		if (i>0 &&
 		    ((*as(&group, aspath[i-1]) && *as(&group, aspath[i-1]) == *as(&group, aspath[i])) ||
@@ -468,6 +473,8 @@ static void make_rel1(asn_t *aspath, int pathlen)
 	else if (!tier1[asndx(aspath[0])])
 		viatier1++;
 	for (i=1; i<pathlen; i++) {
+		if (aspath[i] == as_reserved || aspath[i-1] == as_reserved)
+			continue;
 		if (i+1<first || (i+1==first && last==first+1) ||
 		    (i+1==first && *as(&ix, aspath[i]))) {
 			rel = mkrel(aspath[i], aspath[i-1], 0);
@@ -553,7 +560,7 @@ static int make_rel2(struct rib_t *route, int preflen)
 		}
 		if (newasn == 0)
 			break;
-		if (asn) {
+		if (asn && asn != as_reserved && newasn != as_reserved) {
 			if (needtrace(newasn, asn) && mkrel(newasn, asn, 0)->sure<3)
 				debug(4, "Set %s > %s sure=3: %s/%d seen from %d of %d pathes",
 				      printas(newasn), printas2(asn), printip(curip), preflen, i, route->npathes);
@@ -571,8 +578,10 @@ static int make_rel2(struct rib_t *route, int preflen)
 	}
 	asn = route->pathes[0]->asn;
 	asx = asndx(asn);
-	own_npref[asx]++;
-	own_n24[asx] += nets;
+	if (asn != as_reserved) {
+		own_npref[asx]++;
+		own_n24[asx] += nets;
+	}
 	if (!tier1[asx]) {
 		/* now check only pathes with tier1 */
 		for (i=0; i<route->npathes; i++) {
@@ -594,7 +603,8 @@ static int make_rel2(struct rib_t *route, int preflen)
 			if (nextas[j=asndx(newasn)] == 0) {
 				nextas_arr[nnext++] = j;
 				nextas[j] = 1;
-				mkrel(newasn, route->pathes[i]->asn, 0)->self += nets;
+				if (newasn != as_reserved && route->pathes[i]->asn != as_reserved)
+					mkrel(newasn, route->pathes[i]->asn, 0)->self += nets;
 			}
 		}
 		for (i=0; i<nnext; i++)
@@ -694,6 +704,8 @@ static void make_rel5(asn_t *aspath, int pathlen)
 	}
 	/* relations for IX already set */
 	for (i=1; i<pathlen; i++) {
+		if (aspath[i] == as_reserved || aspath[i-1] == as_reserved)
+			continue;
 		if (i<first || (i==first && last==first+1)) {
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
 			if (needtrace(aspath[i], aspath[i-1]))
@@ -745,6 +757,8 @@ static void make_rel6(asn_t *aspath, int pathlen)
 		}
 	}
 	for (i=1; i<pathlen; i++) {
+		if (aspath[i] == as_reserved || aspath[i-1] == as_reserved)
+			continue;
 		if (i<=ifirst) {
 			if (needtrace(aspath[i], aspath[i-1]) && mkrel(aspath[i], aspath[i-1], 0)->sure == 0)
 				debug(4, "Set sure=1 %s > %s (aspath %s)", 
@@ -1274,6 +1288,7 @@ int main(int argc, char *argv[])
 	nas = 1;
 	num_size = 65536;
 	asnum = malloc(num_size * sizeof(*asnum));
+	as_reserved = htonl(23456);
 
 	for (; *pinputfiles; pinputfiles++) {
 		/* first loop - process params (RIB tables and updates) */
@@ -1724,10 +1739,14 @@ int main(int argc, char *argv[])
 	make_rel2(rib_root, 0);
 	free(nextas);
 	debug(1, "Pass 2 complete");
-	for (i=0; i<nas; i++) {
+	for (i=1; i<nas; i++) {
+		if (asnum[i] == as_reserved)
+			continue;
 		for (j=0; j<rel[i].nas_rel; j++) {
 			struct rel_lem_t *r;
 
+			if (rel[i].as_rel[j].asn == as_reserved)
+				continue;
 			if (rel[i].as_rel[j].sure <= 0)
 				continue;
 			if ((r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0)) <= 0)
@@ -1772,11 +1791,15 @@ int main(int argc, char *argv[])
 	foreach_aspath(make_rel5);
 	debug(1, "Pass 5 complete");
 	foreach_aspath(make_rel6);
-	for (i=0; i<nas; i++) {
+	for (i=1; i<nas; i++) {
+		if (asnum[i] == as_reserved)
+			continue;
 		for (j=0; j<rel[i].nas_rel; j++) {
 			struct rel_lem_t *r;
 
 			if (rel[i].as_rel[j].sure != 1)
+				continue;
+			if (rel[i].as_rel[j].asn == as_reserved)
 				continue;
 			if ((r=mkrel(rel[i].as_rel[j].asn, asnum[i], 0))->sure == 1)
 				continue;
@@ -1821,10 +1844,13 @@ int main(int argc, char *argv[])
 	npeerings = calloc(nas, sizeof(*npeerings));
 	nclients = calloc(nas, sizeof(*nclients));
 	for (i=1; i<nas; i++)
+		if (asnum[i] == as_reserved)
+			continue;
 		for (j=0; j<rel[i].nas_rel; j++) {
 			struct rel_lem_t *r;
 
 			if (asnum[i] == rel[i].as_rel[j].asn) continue;
+			if (rel[i].as_rel[j].asn == as_reserved) continue;
 			r = mkrel(rel[i].as_rel[j].asn, asnum[i], 0);
 			if (rel[i].as_rel[j].sure > r->sure &&
 			    rel[i].as_rel[j].pass2 &&
@@ -1944,10 +1970,11 @@ int main(int argc, char *argv[])
 		       withdr_n24_gr[i]);
 	}
 	for (i=1; i<nas; i++) {
-		printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
-		       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel - 1,
-		       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
-		       *as(&withdr_n24, asnum[i]));
+		if (asnum[i] != as_reserved)
+			printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
+			       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel - 1,
+			       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
+			       *as(&withdr_n24, asnum[i]));
 	}
 
 	for (i=1; i<nas; i++) {
