@@ -3,7 +3,7 @@
 #define MAXPATHES	255
 
 #define MAJVER		0
-#define MINVER		5
+#define MINVER		6
 
 struct dump_entry {
 	uint32_t prefix;

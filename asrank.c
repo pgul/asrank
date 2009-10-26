@@ -1843,7 +1843,7 @@ int main(int argc, char *argv[])
 	nuplinks = calloc(nas, sizeof(*nuplinks));
 	npeerings = calloc(nas, sizeof(*npeerings));
 	nclients = calloc(nas, sizeof(*nclients));
-	for (i=1; i<nas; i++)
+	for (i=1; i<nas; i++) {
 		if (asnum[i] == as_reserved)
 			continue;
 		for (j=0; j<rel[i].nas_rel; j++) {
@@ -1864,6 +1864,7 @@ int main(int argc, char *argv[])
 				npeerings[i]++;
 			}
 		}
+	}
 
 	/* count degree for groups */
 	if (ngroups) {
@@ -1944,8 +1945,8 @@ int main(int argc, char *argv[])
 			for (j=0; j<rel[i].nas_rel; j++) {
 				if (rel[i].as_rel[j].sure == 0) continue;
 				debug(needtrace(rel[i].as_rel[j].asn, asnum[i]) ? 4 : 6,
-				     "Relations %s > %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
-				      printas(rel[i].as_rel[j].asn), s, rel[i].as_rel[j].sure,
+				      "Relations %s > %s: sure %d, pass2: %d, n24: %d, prefs: %d, self: %d, sibling: %d, upstream: %d",
+				      s, printas(rel[i].as_rel[j].asn), rel[i].as_rel[j].sure,
 				      rel[i].as_rel[j].pass2 ? 1 : 0, rel[i].as_rel[j].n24, rel[i].as_rel[j].prefs,
 				      rel[i].as_rel[j].self, rel[i].as_rel[j].sibling ? 1 : 0,
 				      rel[i].as_rel[j].upstream ? 1 : 0);
