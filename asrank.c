@@ -1959,6 +1959,7 @@ int main(int argc, char *argv[])
 	for (i=0; i<ngroups; i++) {
 		str[0] = 0;
 		p = str;
+		if (*as(&ix, asgroup[i].asn[0])) continue;
 		for (j=0; j<asgroup[i].nas; j++) {
 			if (p != str) *p++ = ',';
 			strncpy(p, printas(asgroup[i].asn[j]), sizeof(str) - (p-str) - 1);
@@ -1971,6 +1972,7 @@ int main(int argc, char *argv[])
 		       withdr_n24_gr[i]);
 	}
 	for (i=1; i<nas; i++) {
+		if (*as(&ix, asnum[i])) continue;
 		if (asnum[i] != as_reserved)
 			printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
 			       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel - 1,
