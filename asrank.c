@@ -739,14 +739,15 @@ static void make_rel6(asn_t *aspath, int pathlen)
 		crel1= mkrel(aspath[i-1], aspath[i], 0);
 		crel2= mkrel(aspath[i], aspath[i-1], 0);
 		if (!crel1->pass2 && crel2->pass2) {
-			if (inc == 1 || inc == 2) {
+			if ((inc == 1 || inc == 2) && crel1->sure<-0) {
 				ifirst = i;
 				inc = 1;
 			}
 			ilast = pathlen-1;
 		} else if (crel1->pass2 && !crel2->pass2) {
 			inc = 3;
-			ilast = i-1;
+			if (crel2->sure<=0)
+				ilast = i-1;
 		} else if (crel1->pass2 && crel2->pass2) {
 			inc = 3;
 			ilast = pathlen-1;
