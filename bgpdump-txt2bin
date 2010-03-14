@@ -72,7 +72,7 @@ while (<>)
 		debug(1, "Bad aspath: $_");
 		next;
 	}
-	$curpref = $ip;
+	$curpref = "$ip/$preflen";
 	# ok, now pack and write
 	$asseq = "";
 	$aslen = 0;
