@@ -1,0 +1,118 @@
+#! /usr/bin/perl
+
+#*  4.0.0.0          205.238.48.3                         0 2914 1 i
+#*                   144.228.240.93                       0 1239 1 i
+#*                   134.24.127.3                         0 1740 1 i
+#*                   194.68.130.254                       0 5459 5413 1 i
+#*                   158.43.133.48                        0 1849 702 701 1 i
+#*                   193.0.0.242                          0 3333 286 1 i
+#*                   204.212.44.128                       0 234 266 237 3561 1 i
+#*                   202.232.1.8                          0 2497 2914 1 i
+#*                   204.70.4.89                          0 3561 1 i
+#*                   131.103.20.49                        0 1225 2548 1 i
+
+#*  3.0.0.0          134.55.24.6                            0 293 701 80 ?
+#*                   194.68.130.254                         0 5459 5413 701 80 ?
+#*                   206.157.77.11          155             0 1673 701 80 ?
+#*                   202.232.1.8                            0 2497 701 80 ?
+#*                   144.228.240.93           4             0 1239 701 80 ?
+#*                   204.70.4.89                            0 3561 701 80 ?
+#*                   193.0.0.56                             0 3333 286 701 80 ?
+#*                   158.43.206.96                          0 1849 702 701 80 ?
+#*                   134.24.127.3                           0 1740 701 80 ?
+#*>                  129.250.0.1              2             0 2914 701 80 ?
+#*                   129.250.0.3              5             0 2914 701 80 ?
+#*                   204.212.44.129                         0 234 2914 701 80 ?
+#*                   204.42.253.253                         0 267 234 2914 701 80 ?
+#*  4.0.0.0          134.55.24.6                            0 293 1 i
+
+while ($ARGV[0] eq "-d") {
+	$debug++;
+	shift;
+}
+
+$curpref = "";
+$line = 0;
+while (<>)
+{
+	$line++;
+	unless (/^...(................\d*) (\d..............)...............\s*\s\s\d+ (.*)$/) {
+		debug(3, "Cannot parse: $_");
+		next;
+	}
+	($ip, $peer, $aspath) = ($1, $2, $3);
+	$ip =~ s/\s+$//;
+	$ip = $curpref if $ip eq "";
+	if ($ip =~ m@/@) {
+		($ip, $preflen) = ($`, $');
+	} else {
+		$preflen = 24;
+	}
+	if ($ip !~ /^\d+\.\d+\.\d+\.\d+$/ || $preflen !~ /^\d+$/) {
+		debug(1, "Bad IP '$ip': $_");
+		next;
+	}
+	$peer =~ s/\s+$//;
+	unless ($peer =~ /^\d+\.\d+\.\d+\.\d+$/) {
+		debug(1, "Bad peer: $_");
+		next;
+	}
+	$aspath =~ s/\s+$//;
+	unless ($aspath =~ / \S$/) {
+		debug(1, "Bad aspath end: $_");
+		next;
+	}
+	$aspath = $`;
+	if ($aspath =~ /^\s/) {
+		debug(1, "Bad aspath start: $_");
+		next;
+	}
+	$aspath =~ s/\{(\d+)(,\d+)*\}/$1/g;	# assume assets as first as in the set
+	if ($aspath =~ /[^ 0-9.]/) {
+		debug(1, "Bad aspath: $_");
+		next;
+	}
+	$curpref = $ip;
+	# ok, now pack and write
+	$asseq = "";
+	$aslen = 0;
+	foreach (split(/\s+/, $aspath)) {
+		$asseq .= pack("n", $_);
+		$aslen++;
+	}
+	$attr = pack("CC", 2, $aslen) . $asseq;	# type=AS_SEQUENCE (2)
+#	if ($length($attr)<256) {
+#		$attrhdr = pack("CC", 0x10, 0);	# flag, type=BGP_ATTR_AS_PATH
+#		$attrhdr .= pack("C", length($attr));
+#	} else {
+		$attrhdr = pack("CC", 0x10, 2);	# flag, type=BGP_ATTR_AS_PATH
+		$attrhdr .= pack("n", length($attr));
+#	}
+
+	$res = pack("N", 0);		# view, seq
+	$res .= packip($ip);
+	$res .= pack("C", $preflen);
+	$res .= pack("CN", 0, 0);	# status, uptime
+	$res .= packip($peer);
+	$origas = ($aspath =~ /^\d+/ ? $& : 0);
+	$res .= pack("n", $origas);
+	$res .= pack("n", length($attrhdr . $attr));
+	print pack("NNN", time(), 0xc0001, length($res . $attrhdr . $attr)) . $res . $attrhdr . $attr;
+}
+
+sub packip
+{
+	my ($ip) = @_;
+	my (@oct) = split(/\./, $ip);
+	return pack("CCCC", $oct[0], $oct[1], $oct[2], $oct[3]);
+}
+
+sub debug
+{
+	my ($level, $str) = @_;
+
+	return if $level > $debug;
+	print STDERR "line $line: $str";
+	print STDERR "\n" unless $str =~ /\n/s;
+}
+
