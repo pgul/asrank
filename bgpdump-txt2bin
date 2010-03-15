@@ -46,7 +46,17 @@ while (<>)
 	if ($ip =~ m@/@) {
 		($ip, $preflen) = ($`, $');
 	} else {
-		$preflen = 24;
+		if ($ip =~ /^(\d+)\./) {
+			if ($1 < 128) {
+				$preflen = 8;
+			} elsif ($1 < 192) {
+				$preflen = 16;
+			} else {
+				$preflen = 24;
+			}
+		} else {
+			debug(1, "Bad IP '$ip': $_");
+		}
 	}
 	if ($ip !~ /^\d+\.\d+\.\d+\.\d+$/ || $preflen !~ /^\d+$/) {
 		debug(1, "Bad IP '$ip': $_");
@@ -82,7 +92,7 @@ while (<>)
 	}
 	$attr = pack("CC", 2, $aslen) . $asseq;	# type=AS_SEQUENCE (2)
 #	if ($length($attr)<256) {
-#		$attrhdr = pack("CC", 0x10, 0);	# flag, type=BGP_ATTR_AS_PATH
+#		$attrhdr = pack("CC", 0, 2);	# flag, type=BGP_ATTR_AS_PATH
 #		$attrhdr .= pack("C", length($attr));
 #	} else {
 		$attrhdr = pack("CC", 0x10, 2);	# flag, type=BGP_ATTR_AS_PATH
