@@ -1958,6 +1958,9 @@ int main(int argc, char *argv[])
 	/* output statistics */
 	printf("==========\n");
 	for (i=0; i<ngroups; i++) {
+		int ndx, existgroup;
+
+		existgroup=0;
 		str[0] = 0;
 		p = str;
 		if (*as(&ix, asgroup[i].asn[0])) continue;
@@ -1966,15 +1969,19 @@ int main(int argc, char *argv[])
 			strncpy(p, printas(asgroup[i].asn[j]), sizeof(str) - (p-str) - 1);
 			p += strlen(p);
 			if (p-str+10 >= sizeof(str)) break;
+			ndx = asndx(asgroup[i].asn[j]);
+			if (ndx && (rel[ndx].nas_rel || own_n24[ndx]))
+				existgroup = 1;
 		}
-		printf(FORMAT, str, n24_gr[i], own_n24_gr[i], npref_gr[i],
-		       own_npref_gr[i], coneas_gr[i].nas, group_rel[i],
-		       nuplinks_gr[i], npeering_gr[i], upd_n24_gr[i],
-		       withdr_n24_gr[i]);
+		if (existgroup)
+			printf(FORMAT, str, n24_gr[i], own_n24_gr[i], npref_gr[i],
+			       own_npref_gr[i], coneas_gr[i].nas, group_rel[i],
+			       nuplinks_gr[i], npeering_gr[i], upd_n24_gr[i],
+			       withdr_n24_gr[i]);
 	}
 	for (i=1; i<nas; i++) {
 		if (*as(&ix, asnum[i])) continue;
-		if (asnum[i] != as_reserved)
+		if (asnum[i] != as_reserved && (rel[i].nas_rel || own_n24[i]))
 			printf(FORMAT, printas(asnum[i]), n24[i], own_n24[i],
 			       npref[i], own_npref[i], coneas[i].nas, rel[i].nas_rel - 1,
 			       nuplinks[i], npeerings[i], *as(&upd_n24, asnum[i]),
