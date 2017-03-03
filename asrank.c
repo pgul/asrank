@@ -1460,9 +1460,6 @@ int main(int argc, char *argv[])
 				*pprefix = realloc(*pprefix, sizeof(struct rib_t) + entry.pathes*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)));
 				fullview++;
 				peerlist = (peerndx_t *)&pprefix[0]->pathes[entry.pathes];
-			} else if (entry.pathes > 1) {
-				warning("The same prefix %s/%d ignored", printip(entry.prefix), entry.preflen);
-				continue;
 			} else {
 				/* neighbor AS already exists for this prefix? */
 				for (i=0; i<pprefix[0]->npathes; i++) {
@@ -1486,9 +1483,9 @@ int main(int argc, char *argv[])
 					warning("Too many pathes for %s/%d, rest ignored", printip(entry.prefix), entry.preflen);
 					continue;
 				}
-				*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+1)*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)));
-				bcopy(&pprefix[0]->pathes[pprefix[0]->npathes], &pprefix[0]->pathes[pprefix[0]->npathes+1], pprefix[0]->npathes*sizeof(peerndx_t));
-				peerlist = (peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes+1];
+				*pprefix = realloc(*pprefix, sizeof(struct rib_t) + (pprefix[0]->npathes+entry.pathes)*(sizeof(pprefix[0]->pathes[0])+sizeof(peerndx_t)));
+				bcopy(&pprefix[0]->pathes[pprefix[0]->npathes], &pprefix[0]->pathes[pprefix[0]->npathes+entry.pathes], pprefix[0]->npathes*sizeof(peerndx_t));
+				peerlist = (peerndx_t *)&pprefix[0]->pathes[pprefix[0]->npathes+entry.pathes];
 			}
 			prefix = *pprefix;
 			if (entry.pathes == 0 && debuglevel >= 8)
