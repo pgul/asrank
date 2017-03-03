@@ -1351,7 +1351,8 @@ int main(int argc, char *argv[])
 			if (*pprefix) {
 				if (pprefix[0]->left)  pref_n24 -= weight(pprefix[0]->left,  entry.preflen+1);
 				if (pprefix[0]->right) pref_n24 -= weight(pprefix[0]->right, entry.preflen+1);
-
+			}
+			if (entry.withdraw && *pprefix) {
 				for (i=0; i<pprefix[0]->npathes; i++)
 					if (peerip(*pprefix, i) == entry.peerip[0])
 						break;
