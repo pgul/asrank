@@ -1531,7 +1531,23 @@ int main(int argc, char *argv[])
 					*as(&wasas, prevas) = 1;
 					path[pathlen++] = prevas;
 				}
-
+				if (entry.withdraw) {
+					for (j=0; j<pathlen; j++)
+						aspath[j] = path[pathlen-j-1];
+					for (j=clientspart(aspath, pathlen, NULL); j>=0; j--) {
+						*as(&updates, aspath[j]) += 1;
+						*as(&upd_n24, aspath[j]) += pref_n24;
+						if ((k = *as(&group, aspath[j]))) {
+							if (!wasgroup[--k]) {
+								updates_gr[k]++;
+								upd_n24_gr[k] += pref_n24;
+								wasgroup[k] = 1;
+							}
+						}
+					}
+					for (j=0; j<ngroups; j++)
+						wasgroup[j] = 0;
+				}
 				curpath = &rootpath;
 				for (j=0; j<pathlen; j++) {
 					int left, right, new;
