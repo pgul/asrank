@@ -479,7 +479,7 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		    (i+1==first && *as(&ix, aspath[i]))) {
 			rel = mkrel(aspath[i], aspath[i-1], 0);
 			if (needtrace(aspath[i], aspath[i-1]) && rel->sure < (rel->sibling ? 3 : 2))
-				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)", 
+				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)",
 				      rel->sibling ? 3 : 2,
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			if (rel->sibling) {
@@ -492,7 +492,7 @@ static void make_rel1(asn_t *aspath, int pathlen)
 		    (i == last && *as(&ix, aspath[i-1]))) {
 			rel = mkrel(aspath[i-1], aspath[i], 0);
 			if (needtrace(aspath[i-1], aspath[i]) && rel->sure < (rel->sibling ? 3 : 2))
-				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)", 
+				debug(4, "Set sure=%d (tier1 or IX) %s > %s (aspath %s)",
 				      rel->sibling ? 3 : 2,
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 			if (rel->sibling) {
@@ -709,13 +709,13 @@ static void make_rel5(asn_t *aspath, int pathlen)
 		if (i<first || (i==first && last==first+1)) {
 			mkrel(aspath[i], aspath[i-1], 0)->pass2 = 1;
 			if (needtrace(aspath[i], aspath[i-1]))
-				debug(4, "Set pass2 %s > %s (aspath %s)", 
+				debug(4, "Set pass2 %s > %s (aspath %s)",
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 		}
 		if (i>last+1 || (i == last+1 && last == first+1)) {
 			mkrel(aspath[i-1], aspath[i], 0)->pass2 = 1;
 			if (needtrace(aspath[i-1], aspath[i]))
-				debug(4, "Set pass2 %s > %s (aspath %s)", 
+				debug(4, "Set pass2 %s > %s (aspath %s)",
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 		}
 	}
@@ -762,12 +762,12 @@ static void make_rel6(asn_t *aspath, int pathlen)
 			continue;
 		if (i<=ifirst) {
 			if (needtrace(aspath[i], aspath[i-1]) && mkrel(aspath[i], aspath[i-1], 0)->sure == 0)
-				debug(4, "Set sure=1 %s > %s (aspath %s)", 
+				debug(4, "Set sure=1 %s > %s (aspath %s)",
 				      printas(aspath[i]), printas2(aspath[i-1]), printaspath(aspath, pathlen));
 			mkrel(aspath[i], aspath[i-1], 1);
 		} else if (i>ilast) {
 			if (needtrace(aspath[i-1], aspath[i]) && mkrel(aspath[i-1], aspath[i], 0)->sure == 0)
-				debug(4, "Set sure=1 %s > %s (aspath %s)", 
+				debug(4, "Set sure=1 %s > %s (aspath %s)",
 				      printas(aspath[i-1]), printas2(aspath[i]), printaspath(aspath, pathlen));
 			mkrel(aspath[i-1], aspath[i], 1);
 		}
