@@ -8,12 +8,15 @@
 #define BGPDUMP_TYPE_MRTD_BGP		 5
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP	12
 #define BGPDUMP_TYPE_ZEBRA_BGP		16
+#define BGPDUMP_TYPE_ZEBRA_BGP_ET	17
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_PEER_INDEX_TABLE	((13ul << 16) | 1)
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST	((13ul << 16) | 2)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP		((12ul << 16) | 1)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS	((12ul << 16) | 3)
 #define BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE			((16ul << 16) | 1)
 #define BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4		((16ul << 16) | 4)
+#define BGPDUMP_TYPE_ZEBRA_BGP_ET_MESSAGE		((17ul << 16) | 1)
+#define BGPDUMP_TYPE_ZEBRA_BGP_ET_MESSAGE_AS4		((17ul << 16) | 4)
 
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AFI_IP6	1
 #define BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4	2
@@ -320,9 +323,17 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				entry->withdraw = 0;
 				entry->pathes = 1;
 				return 0;
+			case BGPDUMP_TYPE_ZEBRA_BGP_ET_MESSAGE:
+			case BGPDUMP_TYPE_ZEBRA_BGP_ET_MESSAGE_AS4:
+				{	/* Ignore milliseconds */
+					uint32_t milliseconds;
+					get_buf(&buf, 4, &milliseconds);
+				}
+				/* fall through */
 			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE:
 			case BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4:
-				if (etype == BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4) {
+				if (etype == BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE_AS4 ||
+				    etype == BGPDUMP_TYPE_ZEBRA_BGP_ET_MESSAGE_AS4) {
 					assize = 4;
 					get_buf(&buf, 4, &(entry->origas[0]));
 				} else {
