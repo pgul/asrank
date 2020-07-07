@@ -354,8 +354,13 @@ static int check_valid_path(asn_t *aspath, int pathlen)
 	int i, seqlen, ret, firsttier1, lasttier1, maxseq;
 	char s[64];
 
-	seqlen = ret = firsttier1 = lasttier1 = maxseq = 0;
-	for (i=0; i<pathlen; i++) {
+	if (pathlen == 0)
+		return 0;
+	ret = 0;
+	seqlen = firsttier1 = lasttier1 = maxseq = 0;
+	if (tier1[asndx(aspath[0])])
+		seqlen = firsttier1 = lasttier1 = maxseq = 1;
+	for (i=1; i<pathlen; i++) {
 		if (tier1[asndx(aspath[i])]) {
 			seqlen++;
 			if (!firsttier1) firsttier1 = i+1;
