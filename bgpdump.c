@@ -249,9 +249,9 @@ int read_dump(FILE *f, struct dump_entry *entry)
 					if (peer_type & BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AFI_IP6)
 						get_buf(&buf, 16, NULL); /* peer IPv6 */ 
 					else
-						get_buf(&buf, 4, &(peer[i].ip));
+						if (get_buf(&buf, 4, &(peer[i].ip))) break;
 					if (peer_type & BGPDUMP_PEERTYPE_TABLE_DUMP_V2_AS4) {
-						if (get_buf(&buf, 4, &(peer[i].as))) break;
+						get_buf(&buf, 4, &(peer[i].as));
 					} else {
 						if (get_buf(&buf, 2, &i16)) break;
 						peer[i].as = htonl(ntohs(i16));
@@ -287,7 +287,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 						entry->peerip[entry->pathes] = peer[i16].ip;
 					} else
 						warning("Too big peer index %d", i16);
-					get_buf(&buf, 4, &i32);	/* originated time */
+					if (get_buf(&buf, 4, &i32)) break;	/* originated time */
 					entry->create_time[entry->pathes] = ntohl(i32);
 					/* process attribute */
 					if (process_attr(4, entry->aspath[entry->pathes]) == 1) {
@@ -417,17 +417,18 @@ int read_dump(FILE *f, struct dump_entry *entry)
 						break;
 					aspathlen = i8;
 					for (j=0; j<aspathlen; j++) {
-						get_buf(&buf, 1, &i8);
+						if (get_buf(&buf, 1, &i8)) break;
 						if (i8 == 0xff) {
-							get_buf(&buf, 4, &entry->aspath[i][j]);
+							if (get_buf(&buf, 4, &entry->aspath[i][j])) break;
 						} else if (i8 < 0xf0) {
-							get_buf(&buf, 1, &c);
+							if (get_buf(&buf, 1, &c)) break;
 							entry->aspath[i][j] = htonl(i8*256+c);
 						} else {
-							get_buf(&buf, 2, &i16);
+							if (get_buf(&buf, 2, &i16)) break;
 							entry->aspath[i][j] = htonl((i8 & 0xf) * 65536 + ntohs(i16));
 						}
 					}
+					if (j<aspathlen) break;
 					entry->origas[i] = entry->aspath[i][0];
 					entry->aspath[i][j] = 0;
 					entry->create_time[i] = 0;
