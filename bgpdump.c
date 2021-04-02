@@ -7,10 +7,12 @@
 
 #define BGPDUMP_TYPE_MRTD_BGP		 5
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP	12
+#define BGPDUMP_TYPE_TABLE_DUMP_V2	13
 #define BGPDUMP_TYPE_ZEBRA_BGP		16
 #define BGPDUMP_TYPE_ZEBRA_BGP_ET	17
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_PEER_INDEX_TABLE	((13ul << 16) | 1)
 #define BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST	((13ul << 16) | 2)
+#define BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV6_UNICAST ((13ul << 16) | 4)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP		((12ul << 16) | 1)
 #define BGPDUMP_TYPE_MRTD_TABLE_DUMP_AFI_IP_32BIT_AS	((12ul << 16) | 3)
 #define BGPDUMP_TYPE_ZEBRA_BGP_MESSAGE			((16ul << 16) | 1)
@@ -32,6 +34,7 @@
 #define AS_CONFED_SET		4
 
 #define AFI_IP			1
+#define AFI_IP6			2
 
 static struct buf_t {
 	char *data;
@@ -271,6 +274,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				debug(3, "Peer index table processed, found %d peers", peer_count);
 				continue;
 			case BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV4_UNICAST:
+			case BGPDUMP_TYPE_TABLE_DUMP_V2_RIB_IPV6_UNICAST:
 				get_buf(&buf, 4, NULL); /* seq */
 				if (get_buf(&buf, 1, &preflen)) break;
 				entry->preflen = preflen;
@@ -345,7 +349,10 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				if (get_buf(&buf, 2, NULL)) break;	/* iface_index */
 				if (get_buf(&buf, 2, &i16)) break;
 				i16 = ntohs(i16);
-				if (i16 != AFI_IP) {
+				if (i16 == AFI_IP6) {
+					warning("Ignore address family IPv6");
+					continue;
+				} else if (i16 != AFI_IP) {
 					error("Unsupported address family 0x%04x, ignoring", i16);
 					continue;
 				}
