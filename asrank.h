@@ -1,5 +1,5 @@
 
-#define MAXPATHLEN	256
+#define MAXPATHLEN	(256+8)
 #define MAXPATHES	255
 
 #define MAJVER		0
