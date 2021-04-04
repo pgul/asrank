@@ -925,7 +925,7 @@ static int collect_stats(struct rib_t *route, int preflen)
 		}
 		if (debuglevel >= 5 || (leak && debuglevel >= 4)) {
 			/* revert aspath direction */
-			static char pathstr[MAXPATHLEN*6];
+			static char pathstr[MAXPATHLEN*12]; /* ASN32 has maximum length 11 chars in dot notation */
 			char *p;
 			asn_t tmp_asn;
 
