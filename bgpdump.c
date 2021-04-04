@@ -350,7 +350,7 @@ int read_dump(FILE *f, struct dump_entry *entry)
 				if (get_buf(&buf, 2, &i16)) break;
 				i16 = ntohs(i16);
 				if (i16 == AFI_IP6) {
-					warning("Ignore address family IPv6");
+					debug(1, "Ignore address family IPv6");
 					continue;
 				} else if (i16 != AFI_IP) {
 					error("Unsupported address family 0x%04x, ignoring", i16);
