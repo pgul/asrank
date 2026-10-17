@@ -76,7 +76,8 @@ static int get_buf(struct buf_t *buf, int len, void *data)
 static int process_attr(int assize, uint32_t *aspath)
 {
 	uint16_t i16;
-	int attr_len, len, aspathlen;
+	uint32_t cur_as, prev_as;
+	int attr_len, len, aspathlen, i, repeats;
 	u_char flag, type, aslen, i8;
 
 	if (get_buf(&buf, 2, &i16)) return 0;
@@ -116,6 +117,8 @@ static int process_attr(int assize, uint32_t *aspath)
 		switch (type) {
 			case BGP_ATTR_AS_PATH:
 				aspathlen = 0;
+				prev_as = 0;
+				repeats = 0;
 				while (len > 0) {
 					if (get_buf(&buf, 1, &type)) break;
 					if (get_buf(&buf, 1, &aslen)) break;
@@ -134,23 +137,32 @@ static int process_attr(int assize, uint32_t *aspath)
 						debug(2, "Unknown attr type %d ignored", type);
 						break;
 					}
-					if (aspathlen + aslen >= MAXPATHLEN) {
-						warning("Too long aspath: %d", aspathlen+aslen);
-						break;
-					}
 					/* process AS_SET as AS_SEQUENCE */
-					if (assize == 4) {
-						if (get_buf(&buf, 4*aslen, aspath+aspathlen))
-							break;
-					} else {
-						int i;
-						for (i=0; i<aslen; i++) {
+					for (i=0; i<aslen; i++) {
+						if (assize == 4) {
+							if (get_buf(&buf, 4, &cur_as)) break;
+						} else {
 							if (get_buf(&buf, 2, &i16)) break;
-							aspath[aspathlen+i] = htonl(ntohs(i16));
+							cur_as = htonl(ntohs(i16));
 						}
+						len -= assize;
+						/* collapse prepends: keep at most MAXPREPEND consecutive repeats */
+						if (cur_as == prev_as) {
+							if (++repeats > MAXPREPEND)
+								continue;
+						} else {
+							prev_as = cur_as;
+							repeats = 1;
+						}
+						if (aspathlen >= MAXASPATH) {
+							/* too long even after collapsing prepends, drop the whole path */
+							warning("Too long aspath (more than %d after collapsing prepends), route ignored", MAXASPATH);
+							aspathlen = 0;
+							break;
+						}
+						aspath[aspathlen++] = cur_as;
 					}
-					aspathlen += aslen;
-					len -= assize*aslen;
+					if (i < aslen) break;
 				}
 				if (get_buf(&buf, len, NULL)) break;
 				aspath[aspathlen] = 0;

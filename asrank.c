@@ -1066,6 +1066,11 @@ static void save_table_recurs(FILE *fout, struct rib_t *route, u_char preflen)
 	for (i=0; i<route->npathes; i++) {
 		aspathlen = 0;
 		for (pt = route->pathes[i]; pt->asn; pt = pt->prev) {
+			/* aspath length is stored in one byte, should never happen: read_dump() drops longer pathes */
+			if (aspathlen >= MAXASPATH) {
+				error("Too long aspath (more than %d) truncated", MAXASPATH);
+				break;
+			}
 			tmp_asn = ntohl(pt->asn);
 			entry.aspath[i][aspathlen++] = tmp_asn;
 			if (tmp_asn < 0xf000)
@@ -1076,10 +1081,6 @@ static void save_table_recurs(FILE *fout, struct rib_t *route, u_char preflen)
 				size += 5;
 		}
 		entry.aspath[i][aspathlen] = 0;
-		if (aspathlen >= 255) {
-			error("Too long aspath trunkated");
-			entry.aspath[i][255] = 0;
-		}
 		/* revert aspath direction */
 		for (j=aspathlen/2-1; j>=0; j--) {
 			tmp_asn = entry.aspath[i][j];

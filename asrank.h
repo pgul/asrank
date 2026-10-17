@@ -1,5 +1,7 @@
 
-#define MAXPATHLEN	(256+8)
+#define MAXASPATH	255	/* max ASNs in aspath: aspath length is stored in one byte in -w result file */
+#define MAXPATHLEN	(256+8)	/* aspath array size, must be > MAXASPATH */
+#define MAXPREPEND	6	/* max consecutive repeats of the same AS kept in aspath */
 #define MAXPATHES	255
 
 #define MAJVER		0
